@@ -1,0 +1,44 @@
+[project]
+name = "eds"
+version = "0.0.1"
+description = "Shopmonkey Enterprise Data Streaming (EDS) consumer — faithful Python port of edsGolang"
+requires-python = ">=3.10"
+# Runtime deps are installed per-milestone (see migration/package-map.md); this list grows as milestones land.
+dependencies = [
+    "xxhash",
+    "msgpack",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
+
+[project.scripts]
+eds = "eds.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["eds*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["error"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+# E/F pyflakes+pycodestyle, I import-sort, UP pyupgrade, B bugbear. Quirk-preserving code is
+# annotated with `# PARITY:` and may carry per-line `# noqa` where idiom would change behavior.
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+warn_redundant_casts = true
+# Pragmatic during the port; tightened per-module as code stabilizes.
+ignore_missing_imports = true
