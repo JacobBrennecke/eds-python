@@ -35,19 +35,26 @@ def stringify(val: object) -> str:
         return ""
 
 
-def marshal(val: object) -> str:
+def marshal(val: object, *, sort_keys: bool = True) -> str:
     """Go ``json.Marshal`` byte output as a str. Raises ValueError where Go returns an error
-    (non-finite float), so callers needing the error (the driver path) can surface it."""
+    (non-finite float), so callers needing the error (the driver path) can surface it.
+
+    ``sort_keys`` defaults to True (Go marshals maps with sorted keys). Pass False to preserve dict
+    insertion order — used to reconstruct ``json.RawMessage`` fields (before/after) verbatim, since Go
+    keeps those raw rather than re-marshaling them."""
     out: list[str] = []
-    _encode(val, out)
+    _encode(val, out, sort_keys)
     return "".join(out)
 
 
-def _encode(v: object, out: list[str]) -> None:
+def _encode(v: object, out: list[str], sort_keys: bool = True) -> None:
     if v is None:
         out.append("null")
     elif isinstance(v, RawJson):
         out.append(v.value)
+    elif hasattr(v, "__gojson__"):
+        # Struct-like values (e.g. DBChangeEvent) serialize in Go field-declaration order with omitempty.
+        out.append(v.__gojson__())
     elif isinstance(v, bool):
         # MUST precede int — bool is an int subclass.
         out.append("true" if v else "false")
@@ -64,17 +71,18 @@ def _encode(v: object, out: list[str]) -> None:
         for i, e in enumerate(v):
             if i:
                 out.append(",")
-            _encode(e, out)
+            _encode(e, out, sort_keys)
         out.append("]")
     elif isinstance(v, dict):
         out.append("{")
         # PARITY: Go sorts map[string] keys; Python str sort == UTF-8 byte order for valid Unicode.
-        for i, key in enumerate(sorted(v.keys())):
+        keys = sorted(v.keys()) if sort_keys else list(v.keys())
+        for i, key in enumerate(keys):
             if i:
                 out.append(",")
             _encode_string(str(key), out)
             out.append(":")
-            _encode(v[key], out)
+            _encode(v[key], out, sort_keys)
         out.append("}")
     else:
         raise ValueError(f"json: unsupported type: {type(v).__name__}")
