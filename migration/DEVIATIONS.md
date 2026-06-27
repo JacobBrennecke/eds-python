@@ -39,6 +39,89 @@ executable bundling the interpreter + deps, matching Go's single-binary distribu
 used single-file self-contained publish for the same reason). Native deps (librdkafka, ODBC) bundle
 where supported; documented at M9.
 
+## M1–M2 utility/infra deviations
+
+### regex-re2-vs-python
+Go uses RE2: `\d`/`\w` are ASCII-only and `$` is end-of-text (no multiline). Python `re` defaults to Unicode
+`\w`/`\d` and `$` also matches before a trailing newline. Ported regexes use `re.ASCII` and `\Z` to match
+Go (mask isURL, sql scalarValue, credentials company/session IDs). **Risk:** none — verified by golden tests
+(e.g. fullwidth digits don't match `[0-9]`; a trailing `\n` blocks `(true|false)\Z`).
+
+### rawjson-reconstruct
+`DBChangeEvent.from_message` reconstructs the raw `before`/`after` (Go `json.RawMessage`) via
+`gojson.marshal(parsed, sort_keys=False)` rather than capturing the exact original bytes. Byte-identical for
+the Go-marshaled upstream (compact, Go-escaped); re-validate against the File/S3/Kafka goldens at M4/M7.
+
+### cache-monotonic-clock
+`util.cache.InMemoryCache` uses `time.monotonic()` for TTL (Go uses wall clock). More robust against
+clock changes; behaviorally equivalent for durations. (The registry's seed asymmetry — TTL 0 dead-on-arrival
+in the cache vs persistent in the tracker — is reproduced exactly under either clock.)
+
+### tracker-deletekey-noop / tracker-prefix-literal / tracker-durability
+sqlite3 replaces BuntDB: deleting a missing key is a no-op (Go's BuntDB Delete returns ErrNotFound);
+`delete_keys_with_prefix` uses a literal ordinal range (`key >= p AND key < p⁺`) not a glob (identical for the
+glob-free keys EDS uses); durability is `PRAGMA synchronous=NORMAL` vs BuntDB's every-second fsync (the tracker
+holds rebuildable local state). `TEXT PRIMARY KEY` uses sqlite's default BINARY collation = BuntDB ordinal order.
+
+### logger-format
+go-common's logger uses fatih/color; its exact wire format is not in the repo. Like the C# port, the logger is
+a clean equivalent — `[ts ]LEVEL [prefix] message [k=v …]` to stderr, no ANSI colors. Level
+filtering/ordering, prefix chaining, fields, fatal→exit, and printf message formatting are faithful (Go
+`%v`→Python `%s`).
+
+### http-conn-error-detection
+`HttpRetry` classifies a retryable connection error by message substring ("connection reset"/"refused") on the
+Python/OS exception, not Go's runtime error strings. The loop is iterative (Go recurses) — behavior-neutral.
+
+### fork-forwardinterrupt-no-signal-relay / fork-kill-direct-child
+`util.process.fork` traps (does not relay) interrupts so the child runs its own graceful shutdown; cancellation
+kills the direct child via `proc.kill()` (full process-tree kill via psutil/taskkill — revisited at M9 with the
+frozen PyInstaller fork). Re-invocation: frozen → `[eds.exe, …]`; dev → `[python, -m, eds, …]`.
+
+### gzip-bytes-not-identical
+`util.compress.gzip_file` output is not byte-identical to Go's gzip (different compressor) but decompresses
+identically; the `.gz` is never byte-compared (read back via gunzip).
+
+## M3 deviations
+
+### registry-sorttable-collision-order
+`sortTable`'s by-table re-key is last-write-wins; Go map iteration order is random (nondeterministic winner),
+Python dict order is deterministic. Behavior-neutral — table names are unique in practice.
+
+### schema-nil-slice-coerced
+`Schema.from_dict` coerces a missing/`null` `properties`/`required`/`primaryKeys` to `{}`/`[]`, so
+`gojson.stringify(schema)` emits `{}`/`[]` where Go (nil map/slice, no omitempty) emits `null`. **Latent**: the
+divergent bytes are only written to the tracker and re-normalized on read, so no registry API result differs;
+the happy path (non-empty fields, which every real source schema has) is byte-identical. Matches the C# port.
+
+### registry-decode-error-text
+Go's `encoding/json` decode-error and transport-error MESSAGES can't be reproduced verbatim. The faithful parts
+ARE reproduced: the contract prefixes (`error fetching schema:` / `error decoding schema…`) and the exception
+TYPE (`ValueError`, so callers catching it still catch it). A `null` body decodes to an empty map / zero Schema
+like Go; a valid-JSON wrong-type body raises the wrapped `error decoding schema` (not a raw `AttributeError`).
+
+### go-json-leniency-not-reproduced
+Go's `encoding/json` is case-insensitive on field names and `Decoder.Decode` ignores trailing bytes after the
+value. Python `from_dict` matches exact (camelCase) tags and `json.loads` rejects trailing data. Safe — the
+Shopmonkey backend emits canonical, single-value JSON; no path/test exercises these.
+
+### metrics-memory-load-partial
+`MemoryStat`/`LoadStat` are a subset of gopsutil (total/available/used/usedPercent/free; load zeros where
+unavailable). In the SCRAPE TEXT only, prometheus-client appends `_total` to the counter name (HELP + sample;
+Go scrapes `eds_total_events`) and renders integer bucket `le` labels as `"10.0"` vs Go's `"10"` — cosmetic
+(a scraper parses them identically; the snapshot values via `collect()` and the gojson serialization are exact).
+`get_system_stats` raises on a provider error (Go returns `(nil,err)`/`(ptr,err)`; the heartbeat caller discards
+the snapshot either way).
+
+### sysinfo-hostinfo-partial / sysinfo-go-version
+`HostInfo` is partially populated (stdlib + psutil best-effort; kernelVersion/platformFamily/virtualization*
+left empty); `go_version` is substituted with the Python version. Informational telemetry (osinfo). PARITY note:
+gopsutil's `HostID` json tag is the lowercase `hostid` (inconsistent with its camelCase siblings) — reproduced.
+
+### osinfo-struct-order
+`SessionStart.os_info` must be a `__gojson__` struct (e.g. `SystemInfo`) to keep Go's declaration-order bytes;
+a plain `dict` would be sorted by `gojson.marshal`. (Only `os_info=None`→`null` is tested at the api layer; the
+real value comes from `get_system_info`, which is a struct.)
+
 <!-- Add further deviations below as they arise (carry over the C# port's where they recur:
-     regex-re2-vs-python, *-tls-default, *-connstring-params-subset, file-uri-windows-drive-letter,
-     download-zip-extract, etc. — re-grounded against the Go source as each subsystem is ported). -->
+     *-tls-default, *-connstring-params-subset, file-uri-windows-drive-letter, download-zip-extract). -->

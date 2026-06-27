@@ -157,6 +157,70 @@ def test_private_uses_apikey_query(tmp_path, monkeypatch) -> None:
         tracker.close()
 
 
+class _BoomSession:
+    """request() raises a NON-connection error (so HttpRetry does not retry it)."""
+
+    def request(self, method: str, url: str, headers: dict | None = None):
+        raise RuntimeError("dns failure")
+
+
+class _OkThenBoomSession:
+    """Constructor fetch succeeds; the get_schema fallback raises a transport error."""
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    def request(self, method: str, url: str, headers: dict | None = None):
+        self.n += 1
+        if self.n == 1:
+            return _Resp(200, _SCHEMA_MAP)
+        raise OSError("connection refused")
+
+
+def test_constructor_transport_error_wrapped(tmp_path) -> None:
+    tracker = new_tracker(str(tmp_path))
+    try:
+        with pytest.raises(ValueError, match="error fetching schema"):
+            new_api_registry(_silent(), "http://api.test", "1.0", tracker, session=_BoomSession())
+    finally:
+        tracker.close()
+
+
+def test_constructor_wrong_shape_body_wrapped(tmp_path) -> None:
+    # Valid JSON, wrong shape -> Go's "error decoding schema" (ValueError, not AttributeError).
+    session = _FakeSession({"/v3/schema": (200, "[1,2,3]")})
+    tracker = new_tracker(str(tmp_path))
+    try:
+        with pytest.raises(ValueError, match="error decoding schema"):
+            new_api_registry(_silent(), "http://api.test", "1.0", tracker, session=session)
+    finally:
+        tracker.close()
+
+
+def test_constructor_null_body_is_empty(tmp_path) -> None:
+    # PARITY: Go decodes a JSON null into a nil map (no error) -> empty registry.
+    session = _FakeSession({"/v3/schema": (200, "null")})
+    tracker = new_tracker(str(tmp_path))
+    try:
+        reg = new_api_registry(_silent(), "http://api.test", "1.0", tracker, session=session)
+        assert reg.get_latest_schema() == {}
+        reg.close()
+    finally:
+        tracker.close()
+
+
+def test_get_schema_fallback_transport_error_wrapped(tmp_path) -> None:
+    session = _OkThenBoomSession()
+    tracker = new_tracker(str(tmp_path))
+    try:
+        reg = new_api_registry(_silent(), "http://api.test", "1.0", tracker, session=session)
+        with pytest.raises(ValueError, match="error fetching schema"):
+            reg.get_schema("order", "v2")  # not seeded -> fallback -> transport error
+        reg.close()
+    finally:
+        tracker.close()
+
+
 def test_private_without_env_raises(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("SM_API_PRIVATE_SCHEMA_KEY", raising=False)
     tracker = new_tracker(str(tmp_path))

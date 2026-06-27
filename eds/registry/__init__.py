@@ -113,7 +113,11 @@ class APIRegistry:
         # Fall back to the API (bare request, no retry — PARITY: http.DefaultClient.Do).
         obj = self._objects.get(table) or table
         url = self._api_url + "/v3/schema/" + obj + "/" + version
-        status, body = _read(self._session.request("GET", url, headers={"User-Agent": self._user_agent}))
+        try:
+            resp = self._session.request("GET", url, headers={"User-Agent": self._user_agent})
+        except Exception as e:  # PARITY: Go wraps transport errors as "error fetching schema: %s"
+            raise ValueError(f"error fetching schema: {e}") from e
+        status, body = _read(resp)
         if status != 200:
             raise ValueError(
                 f"error fetching schema for table: {table}, modelVersion: {version}. "
@@ -135,10 +139,19 @@ class APIRegistry:
 
     @staticmethod
     def _decode_schema(body: str, table: str, version: str) -> Schema:
+        # PARITY: Go json.Decode into a Schema struct — null → zero Schema; a wrong-type body errors.
         try:
-            return Schema.from_dict(json.loads(body))
+            parsed = json.loads(body)
         except ValueError as e:
             raise ValueError(f"error decoding schema for table: {table}, modelVersion: {version}: {e}") from e
+        if parsed is None:
+            return Schema()
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"error decoding schema for table: {table}, modelVersion: {version}: "
+                f"cannot unmarshal {type(parsed).__name__} into Schema"
+            )
+        return Schema.from_dict(parsed)
 
 
 def new_api_registry(
@@ -168,21 +181,20 @@ def _new_api_registry_modified(
     url = api_url + "/v3/schema" + url_modifier
 
     # The ONLY retrying network call (unbounded 5xx/429). PARITY: the un-prefixed logger is used here.
-    resp = HttpRetry(
-        lambda: session.request("GET", url, headers={"User-Agent": user_agent}),
-        method="GET",
-        url=url,
-        logger=logger,
-    ).do()
+    try:
+        resp = HttpRetry(
+            lambda: session.request("GET", url, headers={"User-Agent": user_agent}),
+            method="GET",
+            url=url,
+            logger=logger,
+        ).do()
+    except Exception as e:  # PARITY: Go wraps transport errors as "error fetching schema: %s"
+        raise ValueError(f"error fetching schema: {e}") from e
     status, body = _read(resp)
     if status != 200:
         raise _fetch_error(status, body)
 
-    try:
-        by_object_raw = json.loads(body)
-    except ValueError as e:
-        raise ValueError(f"error decoding schema: {e}") from e
-    by_object = {obj: Schema.from_dict(v) for obj, v in by_object_raw.items()}
+    by_object = _decode_schema_map(body)
     schema, objects = _sort_table(by_object)
 
     # PARITY: the cache (and its sweeper) is created only after the 200, so a failed fetch never starts it.
@@ -197,6 +209,26 @@ def _new_api_registry_modified(
     return APIRegistry(
         logger.with_prefix("[tracker]"), api_url, user_agent, tracker, cache, session, schema, objects
     )
+
+
+def _decode_schema_map(body: str) -> dict[str, Schema]:
+    """PARITY: Go json.Decode into SchemaMap — null → empty map; a wrong-type body (or non-object value)
+    errors as "error decoding schema". (Go's encoding/json text can't be reproduced verbatim, but the
+    "error decoding schema" prefix + the ValueError type match, so callers catching ValueError still catch it.)"""
+    try:
+        raw = json.loads(body)
+    except ValueError as e:
+        raise ValueError(f"error decoding schema: {e}") from e
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"error decoding schema: cannot unmarshal {type(raw).__name__} into schema map")
+    result: dict[str, Schema] = {}
+    for obj, v in raw.items():
+        if not isinstance(v, dict):
+            raise ValueError(f"error decoding schema: cannot unmarshal {type(v).__name__} into Schema")
+        result[obj] = Schema.from_dict(v)
+    return result
 
 
 def _fetch_error(status: int, body: str) -> ValueError:
