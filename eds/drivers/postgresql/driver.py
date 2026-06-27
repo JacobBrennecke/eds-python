@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from eds.dbchange import DBChangeEvent
 from eds.drivers.postgresql import sql
-from eds.drivers.sql_base import SqlDriverBase
+from eds.drivers.sql_base import SqlDb, SqlDriverBase
 from eds.schema import DatabaseSchema, Schema
 from eds.util.logger import Logger
 
@@ -19,6 +19,19 @@ class PostgresqlDriver(SqlDriverBase):
 
     def log_prefix(self) -> str:
         return "[postgres]"
+
+    def get_connection_string_from_url(self, url: str) -> str:
+        return sql.get_connection_string_from_url(url)
+
+    def open_db(self, conninfo: str) -> SqlDb:
+        # PARITY: connect with a 5s timeout; autocommit (DDL) + explicit tx only for the flush batch.
+        import psycopg
+
+        from eds.drivers.postgresql.data_db import PsycopgDb
+
+        assert self._logger is not None
+        conn = psycopg.connect(conninfo, connect_timeout=5, autocommit=True)
+        return PsycopgDb(conn, self._logger)
 
     def validate_scheme(self) -> str:
         return "postgres"

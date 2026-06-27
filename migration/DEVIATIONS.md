@@ -123,5 +123,23 @@ gopsutil's `HostID` json tag is the lowercase `hostid` (inconsistent with its ca
 a plain `dict` would be sorted by `gojson.marshal`. (Only `os_info=None`→`null` is tested at the api layer; the
 real value comes from `get_system_info`, which is a struct.)
 
+## M4 SQL-driver deviations
+
+### gourl
+`eds/util/gourl.py` ports the subset of Go `net/url` that EDS uses, taking **Go as ground truth** rather than
+the reviewed-but-reduced C# `GoUrl.cs`. Where the two differ, Go wins (none is exercised by an existing golden,
+so adopting Go cannot regress and only makes future connstrings faithful): the scheme is lower-cased
+(`Postgres://` → `postgres`, matching the lowercase registry keys); a bad `%`-escape raises in host/path (Go)
+instead of being kept raw (C#); query parsing drops `;`-bearing segments and bad-`%` pairs (Go). IPv6 host
+literals are parsed minimally (validated + kept verbatim) — EDS never uses them; `validUserinfo` is not
+enforced (harmless for EDS credentials). `Values.Encode` sorts keys; per-char escaping matches Go's
+`QueryEscape` exactly (hand-rolled, not `urllib`, which doesn't sort and differs on byte-sets).
+
+### postgres-remote-sslmode
+`get_connection_string_from_url` emits no `sslmode` for remote hosts (byte-parity with Go). At connect time Go
+lib/pq defaults to `require` while libpq/psycopg default to `prefer` — a TLS-default divergence (mirrors the C#
+`postgres-connstring-params-subset`). The emitted string is identical; only the unspecified-remote connect
+behavior differs. Not yet forced in the psycopg connect (revisit if remote TLS matters in deployment).
+
 <!-- Add further deviations below as they arise (carry over the C# port's where they recur:
-     *-tls-default, *-connstring-params-subset, file-uri-windows-drive-letter, download-zip-extract). -->
+     file-uri-windows-drive-letter, download-zip-extract). -->

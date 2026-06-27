@@ -12,6 +12,8 @@ import re
 
 from eds.dbchange import DBChangeEvent
 from eds.schema import DatabaseSchema, Schema, SchemaProperty
+from eds.util import gourl
+from eds.util.file import is_localhost
 from eds.util.gofloat import format_f
 from eds.util.gojson import stringify
 from eds.util.logger import Logger
@@ -159,6 +161,30 @@ def create_sql(s: Schema) -> str:
         body += "\tPRIMARY KEY (" + ", ".join(quote_identifier(pk) for pk in s.primary_keys) + ")"
     table = quote_identifier(s.table)
     return f"DROP TABLE IF EXISTS {table};\nCREATE TABLE {table} (\n{body}\n);\n"
+
+
+def get_connection_string_from_url(urlstr: str) -> str:
+    """PARITY: GetConnectionStringFromURL — force scheme postgresql, default port 5432, inject
+    application_name=eds and (for localhost) sslmode=disable. The query is re-encoded (sorted) ONLY when a
+    default was injected; otherwise raw_query is preserved verbatim."""
+    try:
+        u = gourl.parse(urlstr)
+    except ValueError as e:
+        raise ValueError(f"error parsing postgres db url: {e}") from e
+    u.scheme = "postgresql"
+    if u.port() == "":
+        u.host = u.host + ":5432"
+    q = u.query()
+    reencode = False
+    if not u.query().has("application_name"):  # PARITY: Has checks the ORIGINAL query
+        q.set("application_name", "eds")
+        reencode = True
+    if is_localhost(u.host) and not u.query().has("sslmode"):
+        q.set("sslmode", "disable")
+        reencode = True
+    if reencode:
+        u.raw_query = q.encode()
+    return str(u)
 
 
 def add_new_columns_sql(logger: Logger | None, columns: list[str], s: Schema, db: DatabaseSchema) -> list[str]:

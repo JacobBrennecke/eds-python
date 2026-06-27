@@ -8,6 +8,7 @@ from eds.dbchange import DBChangeEvent
 from eds.drivers.postgresql.sql import (
     add_new_columns_sql,
     create_sql,
+    get_connection_string_from_url,
     quote_identifier,
     quote_string,
     quote_value,
@@ -133,3 +134,25 @@ def test_add_new_columns_sql_skips_existing() -> None:
         'ALTER TABLE "order" ADD COLUMN "internalNumber" TEXT;',
         'ALTER TABLE "order" ADD COLUMN "externalNumber" TEXT;',
     ]
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("postgres://localhost", "postgresql://localhost:5432?application_name=eds&sslmode=disable"),
+        ("postgres://localhost:15432", "postgresql://localhost:15432?application_name=eds&sslmode=disable"),
+        ("postgres://localhost:15432?application_name=foo&sslmode=disable",
+         "postgresql://localhost:15432?application_name=foo&sslmode=disable"),
+        ("postgres://127.0.0.1:15432?application_name=foo&sslmode=disable",
+         "postgresql://127.0.0.1:15432?application_name=foo&sslmode=disable"),
+        ("postgres://127.0.0.1:15432?application_name=foo&sslmode=require",
+         "postgresql://127.0.0.1:15432?application_name=foo&sslmode=require"),
+        ("postgres://foo.aws.com:15432?application_name=foo",
+         "postgresql://foo.aws.com:15432?application_name=foo"),  # remote → no sslmode
+        # derived (url.String reassembly + reencode gate)
+        ("postgres://localhost/db", "postgresql://localhost:5432/db?application_name=eds&sslmode=disable"),
+        ("postgres://hostname:5432/db", "postgresql://hostname:5432/db?application_name=eds"),
+    ],
+)
+def test_get_connection_string_from_url(url, expected) -> None:
+    assert get_connection_string_from_url(url) == expected

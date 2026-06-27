@@ -1,7 +1,6 @@
-"""PARITY: internal/util/sql.go — SQL identifier quoting + the JSON value-coercion helpers.
+"""PARITY: internal/util/sql.go — SQL identifier quoting + the JSON value-coercion helpers + ToUserPass.
 
-``SQLExecuter`` / ``DropTable`` / ``ToUserPass`` are DB- and URL-connection bound; they land in M4 with the
-driver framework (alongside the connection/GoUrl plumbing).
+``SQLExecuter`` / ``DropTable`` are DB-connection bound and live in eds.util.db.
 """
 
 from __future__ import annotations
@@ -9,6 +8,17 @@ from __future__ import annotations
 import re
 
 from eds.schema import SchemaProperty
+from eds.util.gourl import GoUrl
+
+
+def to_user_pass(u: GoUrl) -> str:
+    """PARITY: util.ToUserPass — decoded ``user[:password]`` ("" when there is no userinfo). The password
+    (incl. an empty one) keeps its colon whenever the colon was present in the URL."""
+    if not u.has_user_info:
+        return ""
+    if u.has_password:
+        return f"{u.username}:{u.password}"
+    return u.username
 
 # PARITY: sql.go scalarValue. The anchoring is ASYMMETRIC (SPEC §8.1): `^` binds only the number
 # alternative and `$` only `(true|false)`. With re.search this matches a string that EITHER starts with a
