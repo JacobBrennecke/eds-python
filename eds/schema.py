@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
+from eds.util.gojson import marshal
+
 if TYPE_CHECKING:
     from eds.dbchange import DBChangeEvent
 
@@ -24,6 +26,15 @@ class ItemsType:
     @classmethod
     def from_dict(cls, d: dict) -> ItemsType:
         return cls(type=d.get("type", ""), enum=d.get("enum"), format=d.get("format", ""))
+
+    def __gojson__(self) -> str:
+        # PARITY: schema.go ItemsType struct marshaling — declaration order + omitempty.
+        parts = ['"type":' + marshal(self.type)]
+        if self.enum:
+            parts.append('"enum":' + marshal(self.enum))
+        if self.format:
+            parts.append('"format":' + marshal(self.format))
+        return "{" + ",".join(parts) + "}"
 
 
 @dataclass
@@ -59,6 +70,23 @@ class SchemaProperty:
             deprecated=d.get("deprecated"),
         )
 
+    def __gojson__(self) -> str:
+        # PARITY: schema.go SchemaProperty struct marshaling — declaration order + omitempty.
+        parts = ['"type":' + marshal(self.type)]
+        if self.format:
+            parts.append('"format":' + marshal(self.format))
+        if self.nullable:
+            parts.append('"nullable":' + marshal(self.nullable))
+        if self.items is not None:
+            parts.append('"items":' + self.items.__gojson__())
+        if self.additional_properties is not None:
+            parts.append('"additionalProperties":' + marshal(self.additional_properties))
+        if self.comment is not None:
+            parts.append('"$comment":' + marshal(self.comment))
+        if self.deprecated is not None:
+            parts.append('"deprecated":' + marshal(self.deprecated))
+        return "{" + ",".join(parts) + "}"
+
 
 @dataclass
 class Schema:
@@ -79,6 +107,19 @@ class Schema:
         rest = sorted(name for name in self.properties if name not in self.primary_keys)
         self._columns = list(self.primary_keys) + rest
         return self._columns
+
+    def __gojson__(self) -> str:
+        # PARITY: schema.go Schema struct marshaling — declaration order (properties, required, primaryKeys,
+        # table, modelVersion); no omitempty; the cached `_columns` is excluded (json:"-"). `properties` is a
+        # map → marshaled with sorted keys.
+        return (
+            '{"properties":' + marshal(self.properties)
+            + ',"required":' + marshal(self.required)
+            + ',"primaryKeys":' + marshal(self.primary_keys)
+            + ',"table":' + marshal(self.table)
+            + ',"modelVersion":' + marshal(self.model_version)
+            + "}"
+        )
 
     @classmethod
     def from_dict(cls, d: dict) -> Schema:
