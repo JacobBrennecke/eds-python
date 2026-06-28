@@ -73,6 +73,19 @@ def batch_max(config: ConsumerConfig) -> int:
     return m
 
 
+def validate_company_ids(override: list[str], allowed: list[str]) -> list[str]:
+    """PARITY: consumer.go:730-741 — strict company-id override validation (every override must be present in the
+    credentials; no "*" special-case). Raises ValueError otherwise."""
+    validated: list[str] = []
+    for cid in override:
+        if cid not in allowed:
+            raise ValueError(f"provided company ID {cid} not in credentials")
+        validated.append(cid)
+    if not validated:
+        raise ValueError("no valid company IDs provided")
+    return validated
+
+
 def durable_name(server_id: str, suffix: str) -> str:
     """PARITY: ConsumerSetup.DurableName."""
     return f"eds-{server_id}-{suffix}" if suffix else f"eds-{server_id}"

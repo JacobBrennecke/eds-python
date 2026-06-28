@@ -99,7 +99,12 @@ class BatchProcessor:
     async def process_message(self, msg: Msg) -> None:
         """PARITY: bufferer Arm B — process one message, possibly flushing. Raises on stop paths."""
         log = self._logger
-        m = msg.metadata()
+        try:
+            m = msg.metadata()
+        except Exception as e:  # noqa: BLE001 — PARITY: a metadata-parse error is a fatal nak (consumer.go:349)
+            self._metrics.pending_events_dec()
+            await self._handle_error(e)
+            return
         log.trace("msg received - deliveries=%d,pending=%d", m.num_delivered, len(self._pending))
         self._pending.append(msg)  # PARITY: appended BEFORE the sequence check (so it joins the nak)
         if m.consumer_seq != self._sequence + 1:
@@ -150,8 +155,11 @@ class BatchProcessor:
             return
         if self._pending_started is None:
             self._pending_started = self._now()
-        m2 = msg.metadata()  # catch-up bypass: keep accumulating under a large backlog
-        if m2.num_pending > self._max and (self._now() - self._pending_started) < self._max_pending_latency * 2:
+        try:  # catch-up bypass: keep accumulating under a large backlog
+            num_pending = msg.metadata().num_pending
+        except Exception:  # noqa: BLE001 — PARITY: Go ignores the catch-up metadata error (zero md → 0)
+            num_pending = 0
+        if num_pending > self._max and (self._now() - self._pending_started) < self._max_pending_latency * 2:
             return
         if (  # flush trigger #2 (the >= max arm is redundant; the live arm is the latency timeout)
             len(self._pending) >= self._max

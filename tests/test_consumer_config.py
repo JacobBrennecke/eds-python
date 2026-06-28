@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from eds.consumer.config import (
     ConsumerConfig,
     batch_max,
     durable_name,
     earliest_timestamp,
     filter_subjects,
+    validate_company_ids,
 )
 
 
@@ -59,6 +62,18 @@ def test_filter_subjects() -> None:
         "dbchange.*.*.c1.*.PUBLIC.>",
         "dbchange.*.*.c2.*.PUBLIC.>",
     ]
+
+
+def test_validate_company_ids_strict() -> None:
+    assert validate_company_ids(["c1"], ["c1", "c2"]) == ["c1"]
+    assert validate_company_ids(["c1", "c2"], ["c1", "c2", "c3"]) == ["c1", "c2"]
+    # strict: no "*" special-case — a specific override against ["*"] creds is rejected
+    with pytest.raises(ValueError, match="not in credentials"):
+        validate_company_ids(["c1"], ["*"])
+    with pytest.raises(ValueError, match="not in credentials"):
+        validate_company_ids(["c1", "bad"], ["c1"])
+    with pytest.raises(ValueError, match="no valid company"):
+        validate_company_ids([], ["c1"])
 
 
 def test_earliest_timestamp() -> None:

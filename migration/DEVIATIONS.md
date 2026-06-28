@@ -153,5 +153,44 @@ calls (datetime tz/zero detection; latin-1 vs raw bytes; `str()` of a numeric id
 panic). All are UNREACHABLE from the JSON streaming path (get_object yields only str/float/bool/None/dict/list;
 ids are strings), so they don't affect emitted SQL; implemented for completeness only.
 
+## Consumer (NATS streaming) deviations
+
+### pull-fetch-loop
+Go's live loop uses `jetstream.Consume(handler, PullExpiry(30s), PullMaxMessages(4096))` — a continuous,
+callback-driven pull that streams messages as they arrive. nats-py has no `Consume` callback; its JetStream
+surface is `pull_subscribe_bind` + an explicit `fetch(batch, timeout)`. Still a **pull** consumer (the
+push-vs-pull decision is preserved), but `fetch()` BLOCKS up to its timeout trying to fill `batch` rather than
+streaming, so a partial batch isn't returned until the timeout. `eds/consumer/consumer.py` uses
+`_FETCH_TIMEOUT = 1.0` (not Go's 30s expiry) so a partial batch flows promptly; the BatchProcessor's
+min/max-pending-latency still governs flush batching, so throughput batching is unchanged.
+
+### consumer-max-request-batch-client-side
+Go sets `MaxRequestBatch` on the JetStream consumer config (server caps the pull batch). nats-py's
+`ConsumerConfig` has no such field, so the pull batch is bounded client-side via `fetch(batch=max_pending_buffer)`
+instead. Same effective cap (4096), enforced on the client rather than the server.
+
+### consumer-opt-start-time-datetime
+nats-py's `ConsumerConfig.opt_start_time` is a `datetime`, not an RFC3339 string; the by-start-time deliver
+policy passes the `datetime` directly (the JS API still serializes RFC3339 on the wire).
+
+### nats-reconnect-defaults
+go-common's `cnats.NewNats` reconnect options aren't vendored (not in the local module cache), so nats-py's
+library reconnect defaults are used (allow_reconnect, max_reconnect_attempts, reconnect_time_wait, ping_interval).
+The C# port also used library defaults. Revisit if go-common's values are recovered.
+
+### consumer-self-stops-on-fatal
+Go's `handleError` only naks + pushes the error onto the `subError` channel; the consumer's connection and
+heartbeat stay alive, and the OWNER (fork.go) selects on `Error()` and calls `Stop()`. The asyncio consumer
+instead self-stops on a fatal (`_set_fatal` schedules `stop()`) AND sets an awaitable `fatal()` event so a future
+runner can react. Decision preserved (a fatal naks the residual batch and surfaces the error on `error()`); the
+stop is self-driven rather than owner-driven. Revisit when the runner/main (cmd/server.go) is ported.
+
+### consumer-bufferer-no-busy-spin
+Go's bufferer is a `select` with a `default` (non-blocking) arm that busy-spins when a partial batch is waiting
+for min/max latency. The asyncio Bufferer uses `asyncio.wait_for(queue.get(), timeout=empty_buffer_pause)` so the
+event loop is not blocked while waiting. Same idle/flush decisions; no CPU busy-spin. The hard-cancel (nak
+residual) path is reachable via `stop(graceful=False)` (sets the cancel event); the graceful path uses the None
+sentinel (final flush+ack).
+
 <!-- Add further deviations below as they arise (carry over the C# port's where they recur:
      file-uri-windows-drive-letter, download-zip-extract). -->

@@ -145,6 +145,21 @@ async def test_out_of_order_naks_and_raises() -> None:
     assert d.flushed == 0 and mx.dec == 1
 
 
+async def test_metadata_error_naks_and_raises() -> None:
+    class _BadMetaMsg(_FakeMsg):
+        def metadata(self):
+            raise RuntimeError("bad metadata")
+
+    d, mx = _FakeDriver(), _FakeMetrics()
+    bp = _bp(d, mx)
+    m = _BadMetaMsg(1)
+    with pytest.raises(ConsumerFatalError):
+        await bp.process_message(m)
+    # the offending msg is dec'd but never appended to pending (so not individually nak'd) — matches Go
+    assert mx.dec == 1 and not m.naked
+    assert d.processed == []
+
+
 async def test_decode_error_naks_and_raises() -> None:
     d, mx = _FakeDriver(), _FakeMetrics()
     bp = _bp(d, mx)
