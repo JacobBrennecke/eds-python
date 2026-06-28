@@ -30,7 +30,7 @@ def test_unknown_command_exits_3() -> None:
 
 
 def test_not_yet_implemented_commands(capsys) -> None:
-    for cmd in ("enroll", "import", "download"):
+    for cmd in ("enroll", "download"):
         with pytest.raises(SystemExit) as ei:
             main([cmd])  # argparse: not a registered subcommand → exit 3
         assert ei.value.code == exit_codes.EXIT_INCORRECT_USAGE

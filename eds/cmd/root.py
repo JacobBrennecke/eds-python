@@ -117,6 +117,26 @@ def build_parser() -> _Parser:
     fork.add_argument("--port", type=int, default=get_os_int("PORT", 8080), help=argparse.SUPPRESS)
     _add_consumer_tuning(fork)
 
+    imp = sub.add_parser("import", parents=[base], help="import data from Shopmonkey into your system",
+                         allow_abbrev=False)
+    imp.add_argument("--url", default="", help="driver connection string")
+    imp.add_argument("--api-key", default=os.environ.get("SM_APIKEY", ""), help="the Shopmonkey API key")
+    imp.add_argument("--job-id", default="", help="resume an existing job")
+    imp.add_argument("--dry-run", action="store_true", help="only simulate loading; make no changes")
+    imp.add_argument("--no-confirm", action="store_true", help="skip the confirmation prompt")
+    imp.add_argument("--no-cleanup", action="store_true", help="skip removing the temp directory")
+    imp.add_argument("--no-delete", action="store_true", help="skip dropping + recreating tables")
+    imp.add_argument("--dir", default="", help="reuse an existing import directory instead of downloading")
+    imp.add_argument("--schema-only", action="store_true", help="create the schema only, skip the data import")
+    imp.add_argument("--validate-only", action="store_true", help="validate the connection only, skip the import")
+    imp.add_argument("--timeOffset", dest="time_offset", default="", help="RFC3339 lower bound for exported records")
+    imp.add_argument("--parallel", type=int, default=4, help="parallel upload tasks (if supported)")
+    imp.add_argument("--single", action="store_true", help="insert one row at a time instead of batching")
+    imp.add_argument("--only", action=_CsvAppend, default=None, help="only import these tables")
+    imp.add_argument("--companyIds", dest="company_ids", action=_CsvAppend, default=None, help="only these companies")
+    imp.add_argument("--locationIds", dest="location_ids", action=_CsvAppend, default=None, help="only these locations")
+    imp.add_argument("--api-url", default=None, help=argparse.SUPPRESS)
+
     return parser
 
 
@@ -182,7 +202,11 @@ def main(argv: list[str] | None = None) -> int:
             from eds.cmd.fork import run_fork
 
             return run_fork(args)
-        if command in ("enroll", "import", "download"):
+        if command == "import":
+            from eds.cmd.import_cmd import run_import_command
+
+            return run_import_command(args)
+        if command in ("enroll", "download"):
             print(f"error: command '{command}' is not yet implemented in the Python port", file=sys.stderr)
             return EXIT_INCORRECT_USAGE
     except SystemExit:
