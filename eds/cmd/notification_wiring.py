@@ -14,7 +14,7 @@ import os
 import sys
 import threading
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 from eds.cmd.config import set_config_value
 from eds.cmd.exit_codes import EXIT_INCORRECT_USAGE, EXIT_SUCCESS
@@ -41,9 +41,18 @@ from eds.util.mask import mask, mask_url
 from eds.util.process import ForkArgs, fork
 
 
+class ImportRunResult(NamedTuple):
+    """PARITY: runImport's (success, validated, message, logPath) result. Unpacks positionally like the tuple."""
+
+    success: bool
+    validated: bool
+    message: str | None
+    log_path: str | None
+
+
 def _run_import(
     ctx: ControlPlaneContext, url: str, schema_only: bool, validate_only: bool, job_id: str
-) -> tuple[bool, bool, str | None, str | None]:
+) -> ImportRunResult:
     """PARITY: runImport (server.go:759-836) — fork `eds import`; returns (success, validated, message, logPath)."""
     importargs = ["--url", url, "--api-key", ctx.api_key, "--no-confirm", "--data-dir", ctx.data_dir]
     if schema_only:
@@ -71,18 +80,18 @@ def _run_import(
     except Exception:  # noqa: BLE001 — Go: err && result==nil
         result = None
     if result is None:
-        return True, False, "Error importing data. Please contact support for assistance.", None
+        return ImportRunResult(True, False, "Error importing data. Please contact support for assistance.", None)
 
     ec = result.exit_code
     ctx.logger.debug("import exit code: %d, last log line: %s", ec, result.last_error_lines)
     if ctx.no_restart:
         sys.exit(ec)
     if ec == EXIT_SUCCESS:
-        return True, True, None, None
+        return ImportRunResult(True, True, None, None)
     if ec == EXIT_INCORRECT_USAGE:  # the url is invalid
         lines = result.last_error_lines.rstrip("\n").split("\n")
         msg = lines[-1] if len(lines) > 1 else result.last_error_lines.strip()
-        return False, False, msg, None
+        return ImportRunResult(False, False, msg, None)
     # default failure: upload the import stdout/stderr logs
     ctx.logger.error("import failed with exit code %d: %s", ec, result.last_error_lines)
     upload_log_path = ""
@@ -103,7 +112,7 @@ def _run_import(
                 upload_log_file(ctx.logger, upload_url, stderr_file, version=ctx.version)
             except Exception as e:  # noqa: BLE001
                 ctx.logger.error("failed to upload stderr logfile: %s", e)
-    return (
+    return ImportRunResult(
         True, False,
         "Error importing data. See the error logs for more details or contact support for further assistance.",
         upload_log_path,

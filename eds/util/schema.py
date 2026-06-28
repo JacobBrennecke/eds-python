@@ -23,7 +23,7 @@ from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT7
 
 from eds.dbchange import DBChangeEvent
-from eds.schema import SchemaValidationError
+from eds.schema import SchemaValidationError, ValidationResult
 
 _TMPL_RE = re.compile(r"\{\{\s*\.([a-zA-Z0-9_.]+)\s*\}\}")
 
@@ -81,11 +81,11 @@ class SchemaValidator:
     def __init__(self, rules: dict[str, tuple[jsonschema.protocols.Validator, str]]) -> None:
         self._rules = rules
 
-    def validate(self, event: DBChangeEvent) -> tuple[bool, bool, str]:
+    def validate(self, event: DBChangeEvent) -> ValidationResult:
         """PARITY: SchemaValidator.Validate — (found, valid, path); raises SchemaValidationError on a schema miss."""
         rule = self._rules.get(event.table)
         if rule is None:
-            return False, False, ""  # PARITY: no schema for the table
+            return ValidationResult(False, False, "")  # PARITY: no schema for the table
         validator, template = rule
         obj = _to_schema_event(event)
         try:
@@ -93,7 +93,7 @@ class SchemaValidator:
         except jsonschema.ValidationError as e:  # PARITY: ErrSchemaValidation → caller skips (debug-logs)
             raise SchemaValidationError(str(e)) from e
         path = _render_path(template, obj) if template else ""
-        return True, True, path
+        return ValidationResult(True, True, path)
 
 
 def new_schema_validator(schema_dir: str) -> SchemaValidator:

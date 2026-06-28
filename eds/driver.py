@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import urllib.parse
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
 from eds.dbchange import DBChangeEvent
@@ -19,11 +20,17 @@ from eds.schema import DatabaseSchema, Schema, SchemaMap, SchemaRegistry, Schema
 from eds.util.gojson import marshal
 from eds.util.logger import Logger
 
-# PARITY: driver.go DriverType / DriverFormat string constants.
-DRIVER_TYPE_STRING = "string"
-DRIVER_TYPE_NUMBER = "number"
-DRIVER_TYPE_BOOLEAN = "boolean"
-DRIVER_FORMAT_PASSWORD = "password"
+
+# PARITY: driver.go DriverType / DriverFormat string constants. `str, Enum` (3.10 has no StrEnum) so members are
+# byte-identical strings through marshal (isinstance(str)); never str()/f-string them (3.10 yields "DriverType.X").
+class DriverType(str, Enum):
+    STRING = "string"
+    NUMBER = "number"
+    BOOLEAN = "boolean"
+
+
+class DriverFormat(str, Enum):
+    PASSWORD = "password"
 
 
 class DriverStoppedError(Exception):
@@ -69,7 +76,7 @@ class DriverField:
     """PARITY: driver.go DriverField (JSON order: name, type, format?, default?, description, required)."""
 
     name: str = ""
-    type: str = DRIVER_TYPE_STRING
+    type: str = DriverType.STRING
     format: str | None = None  # omitempty (omit when empty/None)
     default: str | None = None  # *string, omitempty (omit when None)
     description: str = ""
@@ -211,22 +218,17 @@ def string_pointer(val: str) -> str | None:
     return None if val == "" else val
 
 
-def int_pointer(val: int) -> int:
-    """PARITY: IntPointer."""
-    return val
-
-
 def required_string_field(name: str, description: str, default: str | None) -> DriverField:
-    return DriverField(name=name, type=DRIVER_TYPE_STRING, description=description, required=True, default=default)
+    return DriverField(name=name, type=DriverType.STRING, description=description, required=True, default=default)
 
 
 def optional_string_field(name: str, description: str, default: str | None) -> DriverField:
-    return DriverField(name=name, type=DRIVER_TYPE_STRING, description=description, required=False, default=default)
+    return DriverField(name=name, type=DriverType.STRING, description=description, required=False, default=default)
 
 
 def optional_password_field(name: str, description: str, default: str | None) -> DriverField:
     return DriverField(
-        name=name, type=DRIVER_TYPE_STRING, format=DRIVER_FORMAT_PASSWORD, description=description,
+        name=name, type=DriverType.STRING, format=DriverFormat.PASSWORD, description=description,
         required=False, default=default,
     )
 
@@ -234,7 +236,7 @@ def optional_password_field(name: str, description: str, default: str | None) ->
 def optional_number_field(name: str, description: str, default: int | None) -> DriverField:
     # PARITY: the numeric default is stored as its decimal string form via %d.
     default_str = str(default) if default is not None else None
-    return DriverField(name=name, type=DRIVER_TYPE_NUMBER, description=description, required=False, default=default_str)
+    return DriverField(name=name, type=DriverType.NUMBER, description=description, required=False, default=default_str)
 
 
 # ---- config value getters (driver.go — exact type-assertion semantics) ----------------------------
@@ -318,7 +320,7 @@ def new_database_configuration(defport: int) -> list[DriverField]:
         required_string_field("Hostname", "The hostname or ip address to database", None),
     ]
     if defport > 0:
-        fields.append(optional_number_field("Port", "The port to database", int_pointer(defport)))
+        fields.append(optional_number_field("Port", "The port to database", defport))
     return fields
 
 

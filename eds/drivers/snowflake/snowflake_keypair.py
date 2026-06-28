@@ -7,7 +7,7 @@ and snowflake-connector connect are unit-untestable (no account) and lazily impo
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, NamedTuple
 
 from eds.driver import (
     DriverField,
@@ -24,13 +24,23 @@ from eds.util.gourl import GoUrl, Userinfo, query_escape
 _SECRET_DEFAULT_ENV = "SNOWFLAKE_SECRET_ACCESS_KEY"
 
 
-def parse_key_pair_url(url: str) -> tuple[str, str, str, str, str]:
+class KeyPairUrl(NamedTuple):
+    """PARITY: a parsed snowflake-keypair URL. Unpacks positionally like the original 5-tuple."""
+
+    user: str
+    account: str
+    database: str
+    schema: str
+    secret_var: str  # gourl Values.get returns "" (not None) when absent
+
+
+def parse_key_pair_url(url: str) -> KeyPairUrl:
     """PARITY: parse a snowflake-keypair URL → (user, account, database, schema, secret_var)."""
     u = gourl.parse(url)
     parts = u.path.removeprefix("/").split("/")  # PARITY: Go TrimPrefix strips exactly one leading slash
     if len(parts) < 2:
         raise ValueError(f"invalid URL path: expected /database/schema, got {u.path}")
-    return u.username, u.host, parts[0], parts[1], u.query().get("secret-key")
+    return KeyPairUrl(u.username, u.host, parts[0], parts[1], u.query().get("secret-key"))
 
 
 class SnowflakeKeyPairDriver(SnowflakeDriver):

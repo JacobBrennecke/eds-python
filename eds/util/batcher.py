@@ -41,8 +41,6 @@ class Batcher:
 
     def __init__(self) -> None:
         self._records: list[Record] = []
-        # PARITY: Go declares a pks map here but never reads/writes data into it (vestigial); kept for fidelity.
-        self._pks: dict[str, int] = {}
 
     def add(self, event: DBChangeEvent) -> None:
         """PARITY: Add — append a Record built from the event (object error is handled in the consumer)."""
@@ -65,7 +63,6 @@ class Batcher:
     def clear(self) -> None:
         """PARITY: Clear."""
         self._records = []
-        self._pks = {}
 
     def __len__(self) -> int:
         """PARITY: Len."""

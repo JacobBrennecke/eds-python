@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 # PARITY: crdbExportFileRegex. DEVIATION: Go RE2 \d==[0-9], \w==[A-Za-z0-9_] (ASCII); Python \d/\w are Unicode,
 # so use explicit ASCII classes. Groups: 1=33-digit precise date, 2=table, 3=schema/version id (unused).
@@ -33,13 +34,21 @@ def parse_precise_date(date_str: str) -> tuple[int, bool]:
     return whole_seconds * 1_000_000_000 + nanos, True
 
 
-def parse_crdb_export_file(file: str) -> tuple[str, int, bool]:
+class CrdbExportFile(NamedTuple):
+    """PARITY: a parsed CRDB export filename. Unpacks positionally like the original 3-tuple."""
+
+    table: str
+    unix_nanos: int
+    ok: bool
+
+
+def parse_crdb_export_file(file: str) -> CrdbExportFile:
     """PARITY: ParseCRDBExportFile — (table, unix_nanos, ok). ok=False on no-match or a bad date."""
     filename = os.path.basename(file)  # PARITY: filepath.Base (OS-aware separators)
     m = _CRDB_EXPORT_FILE_RE.match(filename)
     if m is None:
-        return "", 0, False
+        return CrdbExportFile("", 0, False)
     unix_nano, ok = parse_precise_date(m.group(1))
     if not ok:
-        return "", 0, False
-    return m.group(2), unix_nano, True
+        return CrdbExportFile("", 0, False)
+    return CrdbExportFile(m.group(2), unix_nano, True)

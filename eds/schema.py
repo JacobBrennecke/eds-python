@@ -7,7 +7,7 @@ registry; it is ported in ``eds.migration`` at M5.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, NamedTuple, Protocol
 
 from eds.util.gojson import marshal
 
@@ -169,8 +169,17 @@ class SchemaValidationError(Exception):
     exception is an internal validator error that aborts the run."""
 
 
+class ValidationResult(NamedTuple):
+    """PARITY: SchemaValidator.Validate's (found, valid, transformed-path) result (Go's 4-tuple minus the error,
+    which is raised). Unpacks positionally like the original tuple; the named fields self-document call sites."""
+
+    found: bool
+    valid: bool
+    path: str
+
+
 class SchemaValidator(Protocol):
     """PARITY: schema.go SchemaValidator — (found, valid, transformed-path); raises SchemaValidationError on
     a mismatch (skip) or another exception on an internal error (abort)."""
 
-    def validate(self, event: DBChangeEvent) -> tuple[bool, bool, str]: ...
+    def validate(self, event: DBChangeEvent) -> ValidationResult: ...
