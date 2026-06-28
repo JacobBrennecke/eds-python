@@ -27,12 +27,19 @@ from eds.cmd.exit_codes import (
     MAX_FAILURES,
 )
 from eds.cmd.loopback import LoopbackServer
+from eds.cmd.notification_wiring import (
+    ControlPlaneContext,
+    NotificationRunner,
+    build_notification_handler,
+    is_nats_connection_error,
+)
 from eds.cmd.session import (
     AlreadyRunningError,
     send_end_and_upload,
     send_start,
     write_creds_to_file,
 )
+from eds.notification.dtos import SendLogsResponse
 from eds.util.api import get_api_url_from_jwt
 from eds.util.file import get_free_port
 from eds.util.logger import Logger
@@ -169,6 +176,11 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
     base_args = collect_command_args(argv[1:])
     base_args += ["--port", str(port), "--data-dir", data_dir, "--server", nats_url, "--api-url", api_url]
 
+    ctx = ControlPlaneContext(
+        logger=logger, port=port, api_url=api_url, api_key=api_key, version=version, keep_logs=keep_logs
+    )
+    handler = build_notification_handler(ctx)
+
     shutdown_sig = ShutdownSignal()
     failures = 0
     current_creds_file: str | None = None
@@ -193,6 +205,19 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
             write_creds_to_file(session.credential, creds_file)
             current_creds_file = creds_file
             logs_dir = os.path.join(session_dir, "logs")
+            ctx.session_id = session_id
+
+            runner = NotificationRunner(logger, nats_url, handler)
+            try:
+                runner.start(creds_file, renew_interval=args.renew_interval)
+            except Exception as e:  # noqa: BLE001
+                runner.stop()
+                if is_nats_connection_error(e):  # PARITY: NATS-connect failure → retry in 5s (server.go:996)
+                    logger.warn("failed to connect to nats: %s; retrying in 5s", e)
+                    time.sleep(5)
+                    continue
+                # other Start errors: the control plane is auxiliary — log and fork anyway so data keeps streaming
+                logger.error("failed to start notification consumer: %s; continuing without remote control", e)
 
             fork_args = base_args + [
                 "--creds", creds_file,
@@ -201,60 +226,72 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
                 "--server", nats_url,
             ]
             try:
-                result = fork(
-                    ForkArgs(
-                        command="fork",
-                        args=fork_args,
-                        log_filename_label="server",
-                        save_logs=True,
-                        write_to_std=True,
-                        forward_interrupt=True,
-                        dir=session_dir,
-                        log=logger,
-                        context=shutdown_sig,
+                ctx.fork_running = True
+                try:
+                    result = fork(
+                        ForkArgs(
+                            command="fork",
+                            args=fork_args,
+                            log_filename_label="server",
+                            save_logs=True,
+                            write_to_std=True,
+                            forward_interrupt=True,
+                            dir=session_dir,
+                            log=logger,
+                            context=shutdown_sig,
+                        )
                     )
-                )
-            except Exception as e:  # noqa: BLE001 — PARITY: fork spawn failure → failures++ (server.go:1036)
+                except Exception as e:  # noqa: BLE001 — PARITY: fork spawn failure → failures++ (server.go:1036)
+                    failures += 1
+                    logger.error("failed to fork consumer: %s (failure %d/%d)", e, failures, MAX_FAILURES)
+                    continue
+                ec = result.exit_code
+                ctx.fork_running = False
+
+                if args.no_restart:
+                    return ec
+                if ec != EXIT_INCORRECT_USAGE:  # exit 3 never uploads logs
+                    log_file = ""
+                    try:
+                        from eds.cmd.session import get_remaining_log
+
+                        log_file = get_remaining_log(logs_dir)
+                    except OSError:
+                        pass  # PARITY: missing logs dir → proceed with an empty logfile
+                    errored = ec != EXIT_SUCCESS and ec != EXIT_RESTART
+                    stderr_file = os.path.join(session_dir, "server_stderr.txt")
+                    try:
+                        log_path = send_end_and_upload(
+                            logger, api_url, api_key, session_id, errored, log_file, stderr_file, version=version
+                        )
+                        # PARITY: server.go:1055 — report the uploaded log path back to HQ.
+                        runner.publish_send_logs_response(SendLogsResponse(path=log_path, session_id=session_id))
+                    except Exception as e:  # noqa: BLE001 — log upload is best-effort; do not abort the loop
+                        logger.error("failed to upload logs: %s", e)
+
+                if ec == EXIT_NATS_DISCONNECTED:
+                    time.sleep(5)
+                    continue
+                if ec == EXIT_SUCCESS:
+                    if not keep_logs:
+                        shutil.rmtree(session_dir, ignore_errors=True)
+                    return EXIT_SUCCESS
+                if ec == EXIT_INCORRECT_USAGE or (
+                    ec == 1
+                    and (
+                        "error: required flag" in result.last_error_lines
+                        or "Global Flags" in result.last_error_lines
+                    )
+                ):
+                    return ec
+                if ec == EXIT_RESTART:
+                    logger.info("shut down as part of restart")
+                    continue
                 failures += 1
-                logger.error("failed to fork consumer: %s (failure %d/%d)", e, failures, MAX_FAILURES)
-                continue
-            ec = result.exit_code
-
-            if args.no_restart:
-                return ec
-            if ec != EXIT_INCORRECT_USAGE:  # exit 3 never uploads logs
-                log_file = ""
-                try:
-                    from eds.cmd.session import get_remaining_log
-
-                    log_file = get_remaining_log(logs_dir)
-                except OSError:
-                    pass  # PARITY: missing logs dir → proceed with an empty logfile
-                errored = ec != EXIT_SUCCESS and ec != EXIT_RESTART
-                stderr_file = os.path.join(session_dir, "server_stderr.txt")
-                try:
-                    send_end_and_upload(
-                        logger, api_url, api_key, session_id, errored, log_file, stderr_file, version=version
-                    )
-                except Exception as e:  # noqa: BLE001 — log upload is best-effort; do not abort the loop
-                    logger.error("failed to upload logs: %s", e)
-
-            if ec == EXIT_NATS_DISCONNECTED:
-                time.sleep(5)
-                continue
-            if ec == EXIT_SUCCESS:
-                if not keep_logs:
-                    shutil.rmtree(session_dir, ignore_errors=True)
-                return EXIT_SUCCESS
-            if ec == EXIT_INCORRECT_USAGE or (
-                ec == 1 and ("required flag" in result.last_error_lines or "Global Flags" in result.last_error_lines)
-            ):
-                return ec
-            if ec == EXIT_RESTART:
-                logger.info("shut down as part of restart")
-                continue
-            failures += 1
-            logger.error("consumer exited with code %d (failure %d/%d)", ec, failures, MAX_FAILURES)
+                logger.error("consumer exited with code %d (failure %d/%d)", ec, failures, MAX_FAILURES)
+            finally:
+                ctx.fork_running = False
+                runner.stop()  # PARITY: notificationConsumer.Stop() each iteration (server.go:1084)
 
         logger.fatal("too many failures, giving up")
         return 1
