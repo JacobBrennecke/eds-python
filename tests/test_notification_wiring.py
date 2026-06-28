@@ -101,6 +101,50 @@ def test_import_args_are_parseable_by_the_import_subparser() -> None:
         assert resp.success is True, f"import args unparseable with verbose={verbose}"
 
 
+def test_configure_persists_url_to_config(tmp_path) -> None:
+    from eds.cmd.config import load_config
+
+    forker, _ = _forker(0)  # import --validate-only succeeds
+    ctx = _ctx()
+    ctx.forker = forker
+    ctx.configured = True
+    ctx.data_dir = str(tmp_path)
+    resp = build_notification_handler(ctx).configure(ConfigureRequest(url="postgres://x"))
+    assert resp.success is True
+    assert load_config(str(tmp_path)).get_string("url") == "postgres://x"  # persisted
+
+
+def test_shutdown_de_enroll_clears_server_id(tmp_path) -> None:
+    from eds.cmd.config import load_config, write_config
+
+    write_config(str(tmp_path), {"token": "tok", "server_id": "srv1"})
+    srv = LoopbackServer(0, {"/control/shutdown": lambda: (200, "")})
+    srv.start()
+    try:
+        ctx = _ctx(port=srv.port)
+        ctx.data_dir = str(tmp_path)
+        ctx.fork_running = True  # configured + live fork → the loopback shutdown succeeds
+        build_notification_handler(ctx).shutdown("bye", True)  # deleted=True → de-enroll
+    finally:
+        srv.stop()
+    c = load_config(str(tmp_path))
+    assert c.get_string("server_id") == "" and c.get_string("token") == "tok"  # cleared, token kept
+
+
+def test_shutdown_no_de_enroll_when_loopback_fails(tmp_path) -> None:
+    # PARITY: Go nests de-enroll inside `if configured` AFTER a successful loopback shutdown; a loopback failure
+    # (Fatal+return) leaves server_id intact. The de-enroll must NOT run when the shutdown signal failed.
+    from eds.cmd.config import load_config, write_config
+    from eds.util.file import get_free_port
+
+    write_config(str(tmp_path), {"token": "tok", "server_id": "srv1"})
+    ctx = _ctx(port=get_free_port())  # nothing listening → loopback connection refused
+    ctx.data_dir = str(tmp_path)
+    ctx.fork_running = True
+    build_notification_handler(ctx).shutdown("bye", True)  # deleted=True but the loopback fails
+    assert load_config(str(tmp_path)).get_string("server_id") == "srv1"  # NOT cleared
+
+
 def test_import_action_runs_import() -> None:
     forker, calls = _forker(0)
     ctx = _ctx()

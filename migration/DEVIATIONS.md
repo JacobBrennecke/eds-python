@@ -223,5 +223,25 @@ On extraction, a zip with no `.exe` / a tar.gz with no `eds` member RAISES (hard
 than Go's silent fall-through (zip: chmod a 0-byte file + success) / wrapped-EOF. The HTTP download also buffers the
 archive into memory rather than streaming to the temp file (binaries are small; retry-correct) — same on-disk result.
 
+## Config writer + enroll deviations
+
+### config-toml-handwritten-writer
+Go writes config.toml via BurntSushi/toml (enroll) and viper (configure/shutdown). tomli has no writer and tomli-w
+is not a dep, so `eds/cmd/config.py::_dump_toml` is a minimal flat encoder (bool→lowercase, str→backslash/quote-
+escaped + quoted, int/float verbatim). The config is only `token`/`server_id`/`url` (str) + `keep_logs` (bool), and
+the file is never byte-compared (it is read back by tomli) — round-trip via tomli is the test contract.
+
+### config-write-no-viper-merge
+Go's `viper.Set(k,v)` + `viper.WriteConfig()` serializes the WHOLE merged config (config file + Set + bound flags +
+defaults), so a configure/shutdown write also re-persists flag-bound keys (e.g. `keep_logs`). `set_config_value`
+instead read-modify-writes only the keys already in config.toml plus the updated one. The load-bearing persisted
+values (`token`/`server_id`/`url`) round-trip identically; only the incidental persistence of flag-bound keys
+differs. WriteConfig errors are logged non-fatal (matching Go).
+
+### enroll-forward-data-dir
+The server's interactive enroll loop forks `eds enroll <code> --silent` and **forwards `--data-dir`** so the enroll
+writes config.toml to the same directory the server reads. Go omits `--data-dir` on the fork and relies on a shared
+default cwd/data (a latent inconsistency if `--data-dir` was set); forwarding it is the correct behavior.
+
 <!-- Add further deviations below as they arise (carry over the C# port's where they recur:
      file-uri-windows-drive-letter, download-zip-extract). -->

@@ -142,7 +142,19 @@ def build_parser() -> _Parser:
     dl.add_argument("version")
     dl.add_argument("filename")
 
+    en = sub.add_parser("enroll", parents=[base], help="enroll a new server and get an api key", allow_abbrev=False)
+    en.add_argument("code")
+    en.add_argument("--api-url", default="", help=argparse.SUPPRESS)
+
     return parser
+
+
+def get_command_example(command: str, *args: str) -> str:
+    """PARITY: getCommandExample (root.go:268) — a copy-pasteable invocation, wrapped in backticks."""
+    from eds.util.process import _self_invocation
+
+    parts = [*_self_invocation(), command, *args]
+    return "`" + " ".join(p for p in parts if p).strip() + "`"
 
 
 def new_logger(args: argparse.Namespace) -> ConsoleLogger:
@@ -216,8 +228,9 @@ def main(argv: list[str] | None = None) -> int:
 
             return run_download(args)
         if command == "enroll":
-            print(f"error: command '{command}' is not yet implemented in the Python port", file=sys.stderr)
-            return EXIT_INCORRECT_USAGE
+            from eds.cmd.enroll import run_enroll
+
+            return run_enroll(args)
     except SystemExit:
         raise
     except Exception as e:  # noqa: BLE001 — PARITY: RecoverPanic → exit 2

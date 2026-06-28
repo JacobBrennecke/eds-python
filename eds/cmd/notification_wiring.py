@@ -16,6 +16,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
+from eds.cmd.config import set_config_value
 from eds.cmd.exit_codes import EXIT_INCORRECT_USAGE, EXIT_SUCCESS
 from eds.cmd.import_client import create_export_job
 from eds.cmd.session import get_log_upload_url, upload_log_file
@@ -158,15 +159,21 @@ def build_notification_handler(ctx: ControlPlaneContext) -> NotificationHandler:
             ctx.logger.error("failed to restart: %s", e)
 
     def shutdown(message: str, deleted: bool) -> None:
-        # DEVIATION: Go logger.Fatal on a loopback error; here we log and continue (no Fatal from a worker thread).
+        # PARITY: shutdown (server.go:564-581) — the whole body is gated on `if configured` (≈ a live fork here),
+        # and de-enroll runs ONLY after a SUCCESSFUL loopback shutdown.
+        # DEVIATION: Go logger.Fatal on a loopback error; here we log and return (no Fatal from a worker thread).
+        if not ctx.fork_running:
+            return
         try:
-            if ctx.fork_running:
-                _control_get(ctx, "shutdown")
+            _control_get(ctx, "shutdown")
         except Exception as e:  # noqa: BLE001
             ctx.logger.error("failed to shutdown: %s", e)
-        if deleted:
-            # DEFERRED: de-enroll (write server_id="" to config.toml) needs a TOML writer.
-            ctx.logger.warn("de-enroll on shutdown is not yet ported (config.toml write)")
+            return  # PARITY: a loopback failure → Fatal+return; the de-enroll write does NOT run
+        if deleted:  # PARITY: de-enroll — clear server_id in config.toml (server.go:575-576)
+            try:
+                set_config_value(ctx.data_dir, "server_id", "")
+            except Exception as e:  # noqa: BLE001 — Go logs the WriteConfig error (non-fatal)
+                ctx.logger.error("failed to write config: %s", e)
 
     def pause():  # PARITY: returns None on success or the error (→ respond_generically publishes Success=false)
         try:
@@ -231,8 +238,10 @@ def build_notification_handler(ctx: ControlPlaneContext) -> NotificationHandler:
         success, validated, msg, upload_log_path = _run_import(ctx, req.url, False, True, "")
         masked_url = None
         if success and validated:
-            # DEFERRED: persist the url to config.toml (no TOML writer yet); the change is in-memory only.
-            ctx.logger.warn("persisting the driver url to config.toml is not yet ported")
+            try:  # PARITY: viper.Set("url") + WriteConfig (server.go:843-844)
+                set_config_value(ctx.data_dir, "url", req.url)
+            except Exception as e:  # noqa: BLE001 — Go logs the WriteConfig error (non-fatal)
+                ctx.logger.error("failed to write config: %s", e)
             ctx.logger.info("driver configured successfully, waiting for import action...")
             ctx.driver_url = req.url
             try:

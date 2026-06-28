@@ -18,8 +18,9 @@ import threading
 import time
 
 from eds.cmd.args import collect_command_args
-from eds.cmd.config import init_config
+from eds.cmd.config import Config, init_config, load_config
 from eds.cmd.exit_codes import (
+    EXIT_ERROR,
     EXIT_INCORRECT_USAGE,
     EXIT_NATS_DISCONNECTED,
     EXIT_RESTART,
@@ -54,6 +55,29 @@ def run_server(args: argparse.Namespace, argv: list[str]) -> int:
     if not args.wrapper:
         return _run_wrapper_loop(logger, argv)  # Layer 1
     return _run_control_plane(logger, args, argv, _root.VERSION)  # Layer 2
+
+
+def _interactive_enroll(args: argparse.Namespace, data_dir: str) -> Config | None:
+    """PARITY: server.go:445-479 — prompt for a one-time code and fork `eds enroll` until one succeeds.
+
+    Returns the re-read config on success, or None when the user enters an empty code (Go os.Exit(1)).
+    DEVIATION: --data-dir is forwarded to the enroll fork so it writes to the same dir the server reads (Go omits
+    it, relying on a shared default)."""
+    print("\nWelcome to Shopmonkey EDS!\n")
+    while True:
+        try:
+            code = input("Enter one-time enrollment code: ").strip()
+        except EOFError:
+            return None
+        if not code:
+            return None
+        enroll_args = _self_invocation() + ["enroll", code, "--silent", "--data-dir", data_dir]
+        if args.api_url is not None:  # forward only when explicitly set (mirrors Go's Changed("api-url"))
+            enroll_args += ["--api-url", args.api_url]
+        proc = subprocess.run(enroll_args)  # noqa: S603 — inherits std streams (interactive)
+        if proc.returncode == 0:
+            return load_config(data_dir)
+        print()
 
 
 # --------------------------------------------------------------------------- Layer 1
@@ -140,16 +164,20 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
     data_dir = os.path.abspath(os.path.normpath(args.data_dir))
     config = init_config(data_dir, argv)
 
+    server_id = args.eds_id or config.get_string("server_id")
+    if not server_id:  # PARITY: interactive enrollment (server.go:445-479)
+        enrolled = _interactive_enroll(args, data_dir)
+        if enrolled is None:
+            return EXIT_ERROR  # PARITY: empty/declined code → os.Exit(1)
+        config = enrolled
+        server_id = args.eds_id or config.get_string("server_id")
+
     api_key = args.api_key or config.get_string("token")
     driver_url = args.url or config.get_string("url")
-    server_id = args.eds_id or config.get_string("server_id")
     keep_logs = args.keep_logs or config.get_bool("keep_logs")
     nats_url = args.nats_url
     if not api_key:
         logger.fatal("an API key is required (--api-key or $SM_APIKEY)")
-    if not server_id:
-        # DEFERRED: interactive enrollment (server.go:445-479) is not yet ported.
-        logger.fatal("no server id found; enrollment is not yet ported — pass --eds-id")
     if not driver_url:
         # DEFERRED: configure-via-notification (server.go:1003-1014) is not yet ported.
         logger.fatal("no driver url configured; configure-via-notification is not yet ported — pass --url")
