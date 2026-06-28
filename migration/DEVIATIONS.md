@@ -261,5 +261,24 @@ named `eds-<unixMilli>.log` exactly as Go (`time.Now().UnixMilli()`); a sub-mill
 collide and truncate the older file just as in Go — no disambiguating counter was added, since rotations are
 seconds-to-hours apart in practice (newLogFileSink at startup, then the hourly sendlogs ticker / on-demand).
 
+## Schema-validator deviations
+
+### schema-jsonschema-lib
+Go validates with `santhosh-tekuri/jsonschema/v5` (`compiler.AddResource` per file, `compiler.Compile`). The Python
+port uses the `jsonschema` package + a `referencing.Registry`: every schema file is registered under the SAME three
+URIs Go uses — `file://<rel>`, `file:///<rel>`, `file://<abs>` (forward-slashed on Windows) — so cross `$ref`s like
+`file:///models/labor.json` resolve, and each table's root schema is compiled via `validator_for(root,
+registry=...)`. `referencing`/`jsonschema` added as deps. Validation behavior (draft-07, `$ref`, required/enum/etc.)
+matches; exact error *messages* differ between the two libraries (not parity-critical — only logged on skip).
+
+### schema-path-gotemplate
+The per-table `path` is a Go `html/template` (e.g. `{{.table}}/received/{{.table}}_{{.mvccTimestamp}}_{{.id}}.json`).
+The Python port renders it with a minimal regex substituting `{{.field}}` / `{{.nested.field}}` against the schema
+event map. Two sub-points: (1) no HTML escaping (Go's html/template escapes, but the substituted values —
+table/id/mvccTimestamp — are path-safe so it is a no-op); (2) the template is not parsed/validated at load time (Go
+errors in NewSchemaValidator on a malformed template). `validate` also returns a 3-tuple `(found, valid, path)` and
+RAISES `SchemaValidationError` on a schema mismatch, instead of Go's 4-tuple `(found, valid, path, err)` with
+`ErrSchemaValidation` — the consumer + importer already consume that raise-based contract.
+
 <!-- Add further deviations below as they arise (carry over the C# port's where they recur:
      file-uri-windows-drive-letter, download-zip-extract). -->

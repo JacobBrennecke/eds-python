@@ -35,6 +35,7 @@ from eds.registry import new_api_registry
 from eds.tracker import new_tracker
 from eds.util.file import is_localhost
 from eds.util.logger import LogFileSink, new_log_file_sink
+from eds.util.schema import new_schema_validator
 from eds.util.shutdown import ShutdownSignal
 
 
@@ -106,10 +107,12 @@ async def _run_fork_async(args: argparse.Namespace) -> int:  # noqa: C901 — fa
     data_dir = os.path.abspath(os.path.normpath(args.data_dir))
 
     validator = None
-    if args.schema_validator:
-        # DEVIATION (fork-schema-validator-deferred): the schema-validator directory loader is not yet ported;
-        # the fork runs without schema validation when one is requested.
-        logger.warn("schema-validator directory loading is not yet ported; running without validation")
+    if args.schema_validator:  # PARITY: loadSchemaValidator (root.go:245)
+        try:
+            validator = new_schema_validator(args.schema_validator)
+        except Exception as e:  # noqa: BLE001 — PARITY: fork.go uses logger.Fatal here (exit 1), not exitCodeUsage
+            logger.error("error loading validator: %s", e)
+            return EXIT_ERROR
 
     try:
         tracker = new_tracker(data_dir, logger)

@@ -47,10 +47,13 @@ from eds.util.shutdown import ShutdownSignal
 
 
 def load_schema_validator(args: argparse.Namespace, logger: Logger):
-    # DEVIATION (schema-validator-dir-deferred): the --schema-validator directory loader is not yet ported.
-    if getattr(args, "schema_validator", ""):
-        logger.warn("schema-validator directory loading is not yet ported; running without validation")
-    return None
+    # PARITY: loadSchemaValidator (root.go:245) — None when --schema-validator is empty, else the loaded validator.
+    schema_dir = getattr(args, "schema_validator", "")
+    if not schema_dir:
+        return None
+    from eds.util.schema import new_schema_validator
+
+    return new_schema_validator(schema_dir)
 
 
 def _confirm(target: str) -> bool:
@@ -109,7 +112,11 @@ def run_import_command(args: argparse.Namespace) -> int:
         logger.error("error creating tracker: %s", e)
         return EXIT_ERROR
     try:
-        validator = load_schema_validator(args, logger)
+        try:
+            validator = load_schema_validator(args, logger)
+        except Exception as e:  # noqa: BLE001 — PARITY: logger.Fatal("error loading validator") (exit 1)
+            logger.error("error loading validator: %s", e)
+            return EXIT_ERROR
         try:
             registry = new_api_registry(logger, api_url, _root.VERSION, tracker)
         except Exception as e:  # noqa: BLE001 — PARITY: registry build failure is Fatal (exit 1)

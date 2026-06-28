@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Labor Message",
+  "type": "object",
+  "allOf": [{ "$ref": "file:///base/message.json" }],
+  "properties": {
+    "table": { "type": "string", "const": "labor" },
+    "after": { "$ref": "file:///models/labor.json" }
+  },
+  "required": ["table"]
+}
