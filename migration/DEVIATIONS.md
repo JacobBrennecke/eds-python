@@ -192,5 +192,36 @@ event loop is not blocked while waiting. Same idle/flush decisions; no CPU busy-
 residual) path is reachable via `stop(graceful=False)` (sets the cancel event); the graceful path uses the None
 sentinel (final flush+ack).
 
+## Upgrade module deviations
+
+### upgrade-pgp-pgpy
+Go verifies the release with ProtonMail/gopenpgp v3 (`crypto.Auto` detached verify). The Python port uses **pgpy**
+(pure-Python, added to deps; pulls `cryptography`) — `PGPKey.from_blob` (armored key) + `PGPSignature.from_blob`
+(armored-or-binary sig) + `key.verify` over the whole archive. `shopmonkey.asc` is a v4 Ed25519/EdDSA (algo 22)
+key, which pgpy supports. Chosen over `python-gnupg` (needs a shipped `gpg` binary, breaks the M10 one-file build)
+and `cryptography`-only (no OpenPGP packet/armor parsing). pgpy emits `CryptographyDeprecationWarning`s, so the
+verify is wrapped in `warnings.catch_warnings()` (the test suite has `filterwarnings=error`).
+
+### download-arch-goreleaser-mapping
+`.goreleaser.yaml` names assets uname-style (`amd64`→`x86_64`, `386`→`i386`). Go's gopsutil `KernelArch` already
+returns the uname form, but Python's `platform.machine()` returns `amd64` on Windows — a naive port builds a 404.
+`build_release_urls` applies the explicit map (amd64/x86_64→x86_64, 386/i386→i386, arm64/aarch64→arm64, else the
+lowercased machine), title-cases the OS via `platform.system()`, and uses `zip` on Windows else `tar.gz`.
+
+### upgrade-apply-only-for-frozen-binary
+`apply()` swaps the RUNNING executable (the inconshreveable rename-dance). That is only coherent for a single
+packaged binary (the M10 PyInstaller `eds.exe`); under `python -m eds`, `sys.executable` is the interpreter. The
+`upgrade()` module + the `eds download` command are ported and usable now; the `upgrade` notification closure does
+the real docker guard then returns `Success=false "self-upgrade requires the packaged binary"` (the
+download→version-check→apply→parent-`/restart` self-upgrade is deferred to M10 — and is further blocked because the
+current GitHub release assets are Go binaries, not the Python port). The untestable, can't-yet-run frozen flow was
+deliberately NOT shipped.
+
+### upgrade-hidefile-ctypes / upgrade-archive-missing-member-raises
+`hideFile` (Windows `SetFileAttributesW(path, 0x2)`) is done via `ctypes` (no-op off Windows) — same FFI semantics.
+On extraction, a zip with no `.exe` / a tar.gz with no `eds` member RAISES (harden, matching the C# port) rather
+than Go's silent fall-through (zip: chmod a 0-byte file + success) / wrapped-EOF. The HTTP download also buffers the
+archive into memory rather than streaming to the temp file (binaries are small; retry-correct) — same on-disk result.
+
 <!-- Add further deviations below as they arise (carry over the C# port's where they recur:
      file-uri-windows-drive-letter, download-zip-extract). -->

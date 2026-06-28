@@ -34,11 +34,10 @@ from eds.notification.dtos import (
     UpgradeResponse,
     ValidateResponse,
 )
+from eds.util.docker import is_running_inside_docker
 from eds.util.logger import Logger
 from eds.util.mask import mask, mask_url
 from eds.util.process import ForkArgs, fork
-
-_NOT_PORTED = "not yet ported in the Python EDS port"
 
 
 def _run_import(
@@ -188,8 +187,22 @@ def build_notification_handler(ctx: ControlPlaneContext) -> NotificationHandler:
             return e
 
     def upgrade(version: str) -> UpgradeResponse:
-        # DEFERRED: upgrade module (download + PGP verify + apply) + `eds download` not ported.
-        return UpgradeResponse(success=False, message=_NOT_PORTED, session_id=ctx.session_id, version=version)
+        # PARITY: upgrade closure (server.go:620-707) — refuse inside Docker.
+        if is_running_inside_docker():
+            return UpgradeResponse(
+                success=False,
+                message="upgrade is not supported inside a virtualized container system",
+                session_id=ctx.session_id, version=version,
+            )
+        # DEFERRED (upgrade-apply-only-for-frozen-binary): the download→version-check→apply→/restart self-upgrade
+        # swaps the RUNNING executable, which is only coherent for the M10 packaged single binary AND once Python
+        # release artifacts exist (today's GitHub assets are Go binaries). The download MODULE (eds/upgrade) + the
+        # `eds download` command ARE ported and usable; the in-place self-upgrade lands with M10 packaging.
+        ctx.logger.warn("self-upgrade requires the packaged single binary (not yet available); skipping")
+        return UpgradeResponse(
+            success=False, message="self-upgrade requires the packaged binary (not yet available)",
+            session_id=ctx.session_id, version=version,
+        )
 
     def send_logs() -> SendLogsResponse | None:
         # PARITY: sendLogs treats any failure as "no logs" (returns None) — it must never raise out of the

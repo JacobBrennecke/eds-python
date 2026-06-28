@@ -137,6 +137,11 @@ def build_parser() -> _Parser:
     imp.add_argument("--locationIds", dest="location_ids", action=_CsvAppend, default=None, help="only these locations")
     imp.add_argument("--api-url", default=None, help=argparse.SUPPRESS)
 
+    dl = sub.add_parser("download", parents=[base], help="download a new version from GitHub releases",
+                        allow_abbrev=False)
+    dl.add_argument("version")
+    dl.add_argument("filename")
+
     return parser
 
 
@@ -206,7 +211,11 @@ def main(argv: list[str] | None = None) -> int:
             from eds.cmd.import_cmd import run_import_command
 
             return run_import_command(args)
-        if command in ("enroll", "download"):
+        if command == "download":
+            from eds.cmd.download import run_download
+
+            return run_download(args)
+        if command == "enroll":
             print(f"error: command '{command}' is not yet implemented in the Python port", file=sys.stderr)
             return EXIT_INCORRECT_USAGE
     except SystemExit:

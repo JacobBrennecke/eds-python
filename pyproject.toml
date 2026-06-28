@@ -10,6 +10,7 @@ dependencies = [
     "nats-py",
     "requests",
     "tomli; python_version < '3.11'",
+    "pgpy",
 ]
 
 [project.optional-dependencies]
