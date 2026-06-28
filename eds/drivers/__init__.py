@@ -11,6 +11,7 @@ from __future__ import annotations
 def register_all() -> None:
     """Register every built-in driver + importer (PostgreSQL, MySQL, SQL Server, Snowflake, Snowflake KeyPair)."""
     from eds.driver import register_driver, register_importer
+    from eds.drivers.file import FileDriver
     from eds.drivers.mysql.driver import MysqlDriver
     from eds.drivers.postgresql.driver import PostgresqlDriver
     from eds.drivers.snowflake.snowflake import SnowflakeDriver
@@ -23,6 +24,7 @@ def register_all() -> None:
         ("sqlserver", MssqlDriver()),
         ("snowflake", SnowflakeDriver()),
         ("snowflake-keypair", SnowflakeKeyPairDriver()),
+        ("file", FileDriver()),
     ):
         register_driver(protocol, driver)
         register_importer(protocol, driver)

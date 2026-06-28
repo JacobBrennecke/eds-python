@@ -23,6 +23,8 @@ def test_register_all_resolves_drivers_and_aliases() -> None:
         assert _meta("mssql://h/db").name == "Microsoft SQL Server"  # alias
         assert _meta("snowflake://h/db").name == "Snowflake [DEPRECATED]"
         assert _meta("snowflake-keypair://h/db").name == "Snowflake Key Pair"
+        assert _meta("file://folder").name == "File"
+        assert _meta("file://folder").supports_migration is False  # File driver has no migration
         assert _meta("postgres://h/db").supports_migration is True  # SQL drivers support migration
         # resolves for import without connecting
         assert d.new_driver_for_import(None, None, "mysql://h/db", None, None, "/d") is not None
