@@ -7,6 +7,9 @@ requires-python = ">=3.10"
 dependencies = [
     "xxhash",
     "msgpack",
+    "nats-py",
+    "requests",
+    "tomli; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
