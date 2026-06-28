@@ -34,6 +34,7 @@ from eds.metrics import EdsMetrics
 from eds.registry import new_api_registry
 from eds.tracker import new_tracker
 from eds.util.file import is_localhost
+from eds.util.logger import LogFileSink, new_log_file_sink
 from eds.util.shutdown import ShutdownSignal
 
 
@@ -85,7 +86,18 @@ def run_fork(args: argparse.Namespace) -> int:
 async def _run_fork_async(args: argparse.Namespace) -> int:  # noqa: C901 — faithful to fork.go's single Run
     from eds.cmd import root as _root
 
-    logger = _root.new_logger(args).with_prefix("[fork]")
+    base_logger = _root.new_logger(args)
+    # PARITY: fork.go:61 — tee all log records to a rotating per-session log file BEFORE the [fork] prefix.
+    sink: LogFileSink | None = None
+    if args.logs_dir:
+        try:
+            sink = new_log_file_sink(args.logs_dir)
+        except OSError as e:
+            base_logger.error("error creating log file sink: %s", e)
+            return EXIT_INCORRECT_USAGE
+        base_logger.trace("using log file sink: %s", args.logs_dir)
+        base_logger = base_logger.with_sink(sink)
+    logger = base_logger.with_prefix("[fork]")
     register_all()
     nats_url = args.nats_url
     if not args.creds and not is_localhost(nats_url):
@@ -125,6 +137,16 @@ async def _run_fork_async(args: argparse.Namespace) -> int:  # noqa: C901 — fa
 
         return handler
 
+    def _logfile() -> tuple[int, str]:
+        # PARITY: fork.go:155 — rotate the sink and return the just-closed log path for the parent to upload.
+        if sink is None:
+            return 200, ""
+        try:
+            return 200, sink.rotate()
+        except OSError as e:
+            logger.error("error rotating log file: %s", e)
+            return 500, ""
+
     routes = {
         "/": lambda: (200, "OK"),
         "/metrics": lambda: (200, metrics.scrape()),
@@ -132,7 +154,7 @@ async def _run_fork_async(args: argparse.Namespace) -> int:  # noqa: C901 — fa
         "/control/unpause": _ctl("unpause"),
         "/control/restart": _ctl("restart"),
         "/control/shutdown": _ctl("ctl_shutdown"),
-        "/control/logfile": lambda: (200, ""),  # DEVIATION: log-file sink rotation deferred
+        "/control/logfile": _logfile,
     }
     try:
         server = LoopbackServer(args.port, routes)
@@ -216,6 +238,8 @@ async def _run_fork_async(args: argparse.Namespace) -> int:  # noqa: C901 — fa
                 completed = True
             elif shutdown_t in done:
                 completed = True  # OS SIGINT/SIGTERM → clean exit 0
+        # PARITY: log the clean-exit marker BEFORE the sink closes, so it lands in the uploaded log (fork.go:281).
+        logger.info("👋 Bye")
     finally:
         control_task.cancel()
         if consumer is not None:
@@ -223,5 +247,6 @@ async def _run_fork_async(args: argparse.Namespace) -> int:  # noqa: C901 — fa
         driver.stop()
         tracker.close()
         server.stop()
-    logger.info("👋 Bye")
+        if sink is not None:
+            sink.close()  # PARITY: defer sink.Close() (fork.go:67)
     return exit_code

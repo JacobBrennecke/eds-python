@@ -243,5 +243,23 @@ The server's interactive enroll loop forks `eds enroll <code> --silent` and **fo
 writes config.toml to the same directory the server reads. Go omits `--data-dir` on the fork and relies on a shared
 default cwd/data (a latent inconsistency if `--data-dir` was set); forwarding it is the correct behavior.
 
+## Log-file sink deviations
+
+### logsink-clean-text-format
+Go tees fork logs to the file via `newLoggerWithSink` = a MultiLogger of the console logger + `NewJSONLoggerWithSink
+(sink, LevelTrace)`, so the file holds go-common JSON lines. The Python `LogFileSink` instead receives the same
+clean-text lines the console logger produces (an extension of the existing `logger-format` deviation; the C# port
+did likewise). The file is gzipped + uploaded and read as text, so the on-wire format is not parity-critical. Two
+sub-points: (1) the sink captures ALL levels (>=TRACE) regardless of the console `min_level`, matching Go's
+Trace-level sink; (2) sink lines ALWAYS carry a timestamp (an archived log needs one), whereas the console honors
+`--timestamp`.
+
+### logsink-flush-and-naming
+`LogFileSink.write` flushes after every line (Go's `os.File` writes are unbuffered) so a hard kill before
+`close()`/rotate still leaves the logs on disk for `getRemainingLog` to upload at session end. The rotated file is
+named `eds-<unixMilli>.log` exactly as Go (`time.Now().UnixMilli()`); a sub-millisecond double rotation could
+collide and truncate the older file just as in Go — no disambiguating counter was added, since rotations are
+seconds-to-hours apart in practice (newLogFileSink at startup, then the hourly sendlogs ticker / on-demand).
+
 <!-- Add further deviations below as they arise (carry over the C# port's where they recur:
      file-uri-windows-drive-letter, download-zip-extract). -->

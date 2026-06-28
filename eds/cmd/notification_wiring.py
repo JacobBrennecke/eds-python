@@ -215,14 +215,17 @@ def build_notification_handler(ctx: ControlPlaneContext) -> NotificationHandler:
         # PARITY: sendLogs treats any failure as "no logs" (returns None) — it must never raise out of the
         # 1h log-sender ticker.
         try:
+            ctx.logger.info("server logfile requested")  # PARITY: server.go:711
             if not ctx.session_id:
+                ctx.logger.error("no session ID to rotate logs")  # PARITY: server.go:715
                 return None
-            log_file = _control_get(ctx, "logfile")  # the rotated log path (currently a stub returning "")
+            log_file = _control_get(ctx, "logfile")  # the just-rotated (closed) log path from the fork
             if not log_file:
                 return None
             upload_url = get_log_upload_url(ctx.logger, ctx.api_url, ctx.api_key, ctx.session_id, version=ctx.version)
             storage = upload_log_file(ctx.logger, upload_url, log_file, version=ctx.version)
             if not ctx.keep_logs:
+                ctx.logger.debug("removing old logfile: %s", log_file)  # PARITY: server.go:748
                 try:
                     os.remove(log_file)
                 except OSError:
