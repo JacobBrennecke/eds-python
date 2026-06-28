@@ -141,5 +141,17 @@ lib/pq defaults to `require` while libpq/psycopg default to `prefer` — a TLS-d
 `postgres-connstring-params-subset`). The emitted string is identical; only the unspecified-remote connect
 behavior differs. Not yet forced in the psycopg connect (revisit if remote TLS matters in deployment).
 
+### sql-driver-help-deferred
+The SQL drivers' `help()` returns `""` pending the help-rendering util (Go `util.GenerateHelpSection` — green
+title + bold body with fatih/color ANSI). That util + the CLI that displays it land at M8; the ANSI codes are
+grounded there alongside the logger's color decision. `help()` feeds only the CLI metadata commands, not the
+data path. (The C# port did render it; revisit when porting the CLI.)
+
+### sql-driver-quote-value-unreachable-branches
+`quote_value`'s `datetime`, `bytes`/`_binary`, and non-string-`id` paths are not byte-faithful to Go for direct
+calls (datetime tz/zero detection; latin-1 vs raw bytes; `str()` of a numeric id vs Go's string type-assert
+panic). All are UNREACHABLE from the JSON streaming path (get_object yields only str/float/bool/None/dict/list;
+ids are strings), so they don't affect emitted SQL; implemented for completeness only.
+
 <!-- Add further deviations below as they arise (carry over the C# port's where they recur:
      file-uri-windows-drive-letter, download-zip-extract). -->

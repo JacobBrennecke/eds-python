@@ -79,7 +79,7 @@ def to_sql_from_object(
         for name in diff or []:
             if name not in columns or name == "id":
                 continue
-            prop = model.properties[name]
+            prop = model.properties.get(name, SchemaProperty())
             if name in o:
                 v = to_json_string_val(name, quote_value(o[name]), prop, True)
                 update_vals.append(f"{quote_identifier(name)}={v}")
@@ -87,14 +87,14 @@ def to_sql_from_object(
                 # PARITY: missing diff column appends a BARE value (no name= prefix) — sql.go:157-158 quirk.
                 update_vals.append(to_json_string_val(name, "NULL", prop, True))
         for name in columns:
-            prop = model.properties[name]
+            prop = model.properties.get(name, SchemaProperty())
             if name in o:
                 insert_vals.append(to_json_string_val(name, quote_value(o[name]), prop, True))
             else:
                 insert_vals.append(to_json_string_val(name, "NULL", prop, True))
     else:  # INSERT (and any non-UPDATE operation)
         for name in columns:
-            prop = model.properties[name]
+            prop = model.properties.get(name, SchemaProperty())
             if name in o:
                 v = to_json_string_val(name, quote_value(o[name]), prop, True)
                 if name != "id":
@@ -153,7 +153,7 @@ def create_sql(s: Schema) -> str:
     """PARITY: createSQL — DROP + CREATE; columns PK-first then sorted; NOT NULL iff required AND not nullable."""
     lines = []
     for name in s.columns():
-        prop = s.properties[name]
+        prop = s.properties.get(name, SchemaProperty())  # PARITY: Go map zero-value for a missing PK property
         not_null = " NOT NULL" if (name in s.required and not prop.nullable) else ""
         lines.append("\t" + quote_identifier(name) + " " + prop_type_to_sql_type(prop) + not_null + ",\n")
     body = "".join(lines)

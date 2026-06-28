@@ -40,12 +40,17 @@ class PsycopgDb:
         return dbutil.build_db_schema_from_info_schema(logger, self._c, column, value, fail_if_empty, conditions)
 
     def execute_in_transaction(self, sql: str, logger: Logger) -> None:
-        with self._conn.transaction():
-            try:
-                self._conn.execute(sql)  # PARITY: whole batch in one tx (libpq simple protocol, multi-statement)
-            except Exception:
-                logger.error("offending sql: %s", sql)  # PARITY: logged only on the exec failure
-                raise
+        try:
+            with self._conn.transaction():
+                try:
+                    self._conn.execute(sql)  # PARITY: whole batch in one tx (libpq simple, multi-statement)
+                except Exception as e:
+                    logger.error("offending sql: %s", sql)  # PARITY: logged only on the exec failure
+                    raise ValueError(f"unable to execute sql: {e}") from e
+        except ValueError:
+            raise
+        except Exception as e:  # PARITY: begin/commit failure
+            raise ValueError(f"unable to commit transaction: {e}") from e
 
     def exec(self, sql: str) -> None:
         self._conn.execute(sql)

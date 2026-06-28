@@ -29,6 +29,40 @@ def format_f(f: float) -> str:
     return s
 
 
+def format_g(f: float) -> str:
+    """PARITY: strconv.FormatFloat(f, 'g', -1, 64) — shortest round-trip; exponential when the leading-digit
+    decimal exponent E < -4 or E >= 21 (else plain). Used by the MySQL value quoter (distinct from format_f,
+    which never goes exponential)."""
+    if math.isnan(f):
+        return "NaN"
+    if f == math.inf:
+        return "+Inf"
+    if f == -math.inf:
+        return "-Inf"
+    if f == 0:
+        return _zero(f)
+    neg = f < 0
+    _, digs, exp = Decimal(repr(abs(f))).as_tuple()
+    digits = list(digs)
+    while len(digits) > 1 and digits[-1] == 0:  # shortest: strip trailing zeros
+        digits.pop()
+        exp = int(exp) + 1
+    sig = "".join(map(str, digits))
+    e = int(exp) + (len(sig) - 1)  # exponent of the leading significant digit
+    if e < -4 or e >= 21:
+        mant = sig if len(sig) == 1 else sig[0] + "." + sig[1:]
+        s = f"{mant}e{'+' if e >= 0 else '-'}{abs(e):02d}"  # lowercase e, signed, >=2 exp digits
+    else:
+        pp = e + 1  # count of integer digits
+        if pp <= 0:
+            s = "0." + "0" * (-pp) + sig
+        elif pp >= len(sig):
+            s = sig + "0" * (pp - len(sig))
+        else:
+            s = sig[:pp] + "." + sig[pp:]
+    return "-" + s if neg else s
+
+
 def format_json(f: float) -> str:
     """PARITY: encoding/json floatEncoder — 'f' for abs in [1e-6, 1e21), else lowercase 'e' with the
     ``e-0X`` → ``e-X`` exponent cleanup (Go only strips the leading zero on NEGATIVE 2-digit exponents;

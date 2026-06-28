@@ -295,3 +295,7 @@ class SqlDriverBase:
     def validate(self, values: dict[str, Any]) -> tuple[str, list[FieldError]]:
         """PARITY: Validate — URLFromDatabaseConfiguration(scheme, default_port, values)."""
         return url_from_database_configuration(self.validate_scheme(), self.default_port(), values)
+
+    def run_import(self, config: ImporterConfig) -> None:
+        # PARITY: Import — connects, builds the executor, and runs importer.Run (the replay loop lands at M5).
+        raise NotImplementedError("import run loop lands at M5")
