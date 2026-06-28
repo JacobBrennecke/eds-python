@@ -138,6 +138,7 @@ class ControlPlaneContext:
     session_dir: str = ""
     fork_running: bool = False
     forker: Any = None  # injectable for tests; default eds.util.process.fork
+    configure_event: Any = None  # PARITY: configureChannel — import_action signals it to start the first consumer
 
 
 def _control_get(ctx: ControlPlaneContext, path: str) -> str:
@@ -282,8 +283,11 @@ def build_notification_handler(ctx: ControlPlaneContext) -> NotificationHandler:
         if not success:
             return ImportResponse(success=False, message=msg, session_id=ctx.session_id, log_path=upload_log_path)
         if not ctx.configured:
-            # DEFERRED: the configureChannel first-consumer gate (server.py requires --url so configured is True)
+            # PARITY: configureChannel <- true (server.go:891-893) — release the control plane to fork the first
+            # consumer now that a url is configured + the initial import has completed.
             ctx.logger.trace("driver configured")
+            if ctx.configure_event is not None:
+                ctx.configure_event.set()
         else:
             restart()
         return ImportResponse(success=success, message=msg, session_id=ctx.session_id, log_path=upload_log_path)

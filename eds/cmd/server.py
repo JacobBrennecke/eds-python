@@ -178,9 +178,8 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
     nats_url = args.nats_url
     if not api_key:
         logger.fatal("an API key is required (--api-key or $SM_APIKEY)")
-    if not driver_url:
-        # DEFERRED: configure-via-notification (server.go:1003-1014) is not yet ported.
-        logger.fatal("no driver url configured; configure-via-notification is not yet ported — pass --url")
+    # No --url is allowed: the server starts UNCONFIGURED and waits for a `configure` + `import` notification from
+    # HQ before forking the first consumer (PARITY: server.go configureChannel flow, :1003-1014).
 
     if args.api_url is None:  # PARITY: server.go:507-515 — derive the api url from the JWT (Fatal on a bad key)
         try:
@@ -209,15 +208,18 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
         data_dir=data_dir, verbose=args.verbose, no_restart=args.no_restart, driver_url=driver_url,
         configured=bool(driver_url),
     )
+    ctx.configure_event = threading.Event()  # PARITY: configureChannel (signaled by import_action when unconfigured)
     handler = build_notification_handler(ctx)
 
     shutdown_sig = ShutdownSignal()
     failures = 0
     current_creds_file: str | None = None
+    current_session_dir: str | None = None
     try:
         while failures < MAX_FAILURES:
             try:
-                session = send_start(logger, api_url, api_key, driver_url, server_id, company_ids, version=version)
+                # ctx.driver_url, not the captured driver_url: configure may have set it since the last iteration.
+                session = send_start(logger, api_url, api_key, ctx.driver_url, server_id, company_ids, version=version)
             except AlreadyRunningError:
                 logger.info("another server is already running for this id; retrying in 5s")
                 time.sleep(5)
@@ -234,6 +236,7 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
             creds_file = os.path.join(session_dir, "nats.creds")
             write_creds_to_file(session.credential, creds_file)
             current_creds_file = creds_file
+            current_session_dir = session_dir
             logs_dir = os.path.join(session_dir, "logs")
             ctx.session_id = session_id
             ctx.session_dir = session_dir
@@ -250,10 +253,20 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
                 # other Start errors: the control plane is auxiliary — log and fork anyway so data keeps streaming
                 logger.error("failed to start notification consumer: %s; continuing without remote control", e)
 
+            if not ctx.configured:
+                # PARITY: server.go:1003-1014 — an unconfigured server waits for HQ to configure + import (which
+                # signals configure_event) before forking the first consumer; interruptible by a shutdown signal.
+                logger.info("Return to HQ and continue with configuring your server.")
+                while not ctx.configure_event.wait(timeout=0.5):
+                    if shutdown_sig.is_set():
+                        runner.stop()
+                        return EXIT_SUCCESS
+                ctx.configured = True
+
             fork_args = base_args + [
                 "--creds", creds_file,
                 "--logs-dir", logs_dir,
-                "--url", driver_url,
+                "--url", ctx.driver_url,
                 "--server", nats_url,
             ]
             try:
@@ -327,9 +340,16 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
         logger.fatal("too many failures, giving up")
         return 1
     finally:
-        # PARITY: server.go:522-529 defer — always scrub the (last) creds file, even with --keep-logs.
+        # PARITY: server.go:522-529 defer — scrub the (last) creds file, then remove the session dir if it is now
+        # empty and we are not keeping logs (covers a shutdown while still unconfigured: the dir holds only creds).
         if current_creds_file and os.path.exists(current_creds_file):
             try:
                 os.remove(current_creds_file)
+            except OSError:
+                pass
+        if current_session_dir and not keep_logs and os.path.isdir(current_session_dir):
+            try:
+                if not os.listdir(current_session_dir):
+                    os.rmdir(current_session_dir)
             except OSError:
                 pass

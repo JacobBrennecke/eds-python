@@ -164,6 +164,48 @@ def test_import_action_runs_import() -> None:
     assert "--schema-only" in calls2[0]  # backfill=False → schema-only
 
 
+def test_import_action_signals_configure_event_when_unconfigured() -> None:
+    # PARITY: configure-via-notification — an unconfigured server's import_action signals the configureChannel
+    # (configure_event) so the control plane forks the first consumer, instead of issuing a restart.
+    import threading
+
+    forker, _ = _forker(0)
+    ctx = _ctx()
+    ctx.forker = forker
+    ctx.driver_url = "postgres://x"
+    ctx.configured = False
+    ctx.configure_event = threading.Event()
+    resp = build_notification_handler(ctx).import_action(ImportRequest(backfill=True))
+    assert resp.success is True
+    assert ctx.configure_event.is_set()  # released the control plane
+
+
+def test_import_action_restarts_not_signals_when_configured() -> None:
+    import threading
+
+    hits: list[str] = []
+
+    def restart_route():
+        hits.append("restart")
+        return 200, ""
+
+    srv = LoopbackServer(0, {"/control/restart": restart_route})
+    srv.start()
+    try:
+        forker, _ = _forker(0)
+        ctx = _ctx(port=srv.port)
+        ctx.forker = forker
+        ctx.driver_url = "postgres://x"
+        ctx.configured = True  # already configured → restart, do NOT signal the event
+        ctx.fork_running = True
+        ctx.configure_event = threading.Event()
+        build_notification_handler(ctx).import_action(ImportRequest(backfill=True))
+        assert hits == ["restart"]
+        assert not ctx.configure_event.is_set()
+    finally:
+        srv.stop()
+
+
 def test_control_endpoints_hit_fork_loopback() -> None:
     hits: list[str] = []
 
