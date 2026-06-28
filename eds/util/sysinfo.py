@@ -16,9 +16,9 @@ import platform
 import socket
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from eds.util.gojson import marshal
+from eds.util.gostruct import gojson_struct
 
 
 @dataclass
@@ -26,55 +26,35 @@ class HostInfo:
     """PARITY: gopsutil host.InfoStat (declaration order; no omitempty). Partially populated — see
     DEVIATIONS.md#sysinfo-hostinfo-partial."""
 
-    hostname: str = ""
-    uptime: int = 0
-    boot_time: int = 0
-    procs: int = 0
-    os: str = ""
-    platform: str = ""
-    platform_family: str = ""
-    platform_version: str = ""
-    kernel_version: str = ""
-    kernel_arch: str = ""
-    virtualization_system: str = ""
-    virtualization_role: str = ""
-    host_id: str = ""
+    hostname: str = field(default="", metadata={"json": "hostname"})
+    uptime: int = field(default=0, metadata={"json": "uptime"})
+    boot_time: int = field(default=0, metadata={"json": "bootTime"})
+    procs: int = field(default=0, metadata={"json": "procs"})
+    os: str = field(default="", metadata={"json": "os"})
+    platform: str = field(default="", metadata={"json": "platform"})
+    platform_family: str = field(default="", metadata={"json": "platformFamily"})
+    platform_version: str = field(default="", metadata={"json": "platformVersion"})
+    kernel_version: str = field(default="", metadata={"json": "kernelVersion"})
+    kernel_arch: str = field(default="", metadata={"json": "kernelArch"})
+    virtualization_system: str = field(default="", metadata={"json": "virtualizationSystem"})
+    virtualization_role: str = field(default="", metadata={"json": "virtualizationRole"})
+    # PARITY: gopsutil's HostID tag is lowercase "hostid" (inconsistent with its camelCase siblings).
+    host_id: str = field(default="", metadata={"json": "hostid"})
 
     def __gojson__(self) -> str:
-        return (
-            '{"hostname":' + marshal(self.hostname)
-            + ',"uptime":' + marshal(self.uptime)
-            + ',"bootTime":' + marshal(self.boot_time)
-            + ',"procs":' + marshal(self.procs)
-            + ',"os":' + marshal(self.os)
-            + ',"platform":' + marshal(self.platform)
-            + ',"platformFamily":' + marshal(self.platform_family)
-            + ',"platformVersion":' + marshal(self.platform_version)
-            + ',"kernelVersion":' + marshal(self.kernel_version)
-            + ',"kernelArch":' + marshal(self.kernel_arch)
-            + ',"virtualizationSystem":' + marshal(self.virtualization_system)
-            + ',"virtualizationRole":' + marshal(self.virtualization_role)
-            # PARITY: gopsutil's HostID tag is lowercase "hostid" (inconsistent with its camelCase siblings).
-            + ',"hostid":' + marshal(self.host_id)
-            + "}"
-        )
+        return gojson_struct(self)
 
 
 @dataclass
 class SystemInfo:
     """PARITY: sysinfo.go SystemInfo (declaration order; no omitempty)."""
 
-    host: HostInfo | None = None
-    num_cpu: int = 0
-    go_version: str = ""
+    host: HostInfo | None = field(default=None, metadata={"json": "host"})  # NEVER (null when None)
+    num_cpu: int = field(default=0, metadata={"json": "num_cpu"})  # PARITY: snake_case key (not camel)
+    go_version: str = field(default="", metadata={"json": "go_version"})  # PARITY: snake_case key
 
     def __gojson__(self) -> str:
-        return (
-            '{"host":' + marshal(self.host)
-            + ',"num_cpu":' + marshal(self.num_cpu)
-            + ',"go_version":' + marshal(self.go_version)
-            + "}"
-        )
+        return gojson_struct(self)
 
 
 def _go_os() -> str:

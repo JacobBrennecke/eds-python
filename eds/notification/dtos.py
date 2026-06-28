@@ -4,6 +4,9 @@ Two wire paths: request/reply responses are JSON (m.Respond → __gojson__, byte
 fire-and-forget responses are msgpack (publish → to_msgpack() dict). Faithful quirks preserved: ValidateResponse's
 JSON key is the misspelled `messsage`; GenericResponse.message is *string (None omits, "" emits); the `LogPath`
 fields are NEVER serialized (json/msgpack `-`) — they only trigger a separate PublishSendLogsResponse.
+
+Stage-2 WS2: serialization is declarative via field(metadata=...) over eds.util.gostruct (see that module); each
+field's json key + omit rule reproduces the Go struct tags exactly.
 """
 
 from __future__ import annotations
@@ -12,20 +15,17 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from eds.driver import DriverConfigurator, FieldError
-from eds.util.gojson import marshal
+from eds.util.gostruct import OmitEmpty, gojson_struct, msgpack_dict
 
 
 # ---- inbound (built from Notification.data; never serialized) ----
 @dataclass
 class Notification:
-    action: str = ""
-    data: dict[str, Any] = field(default_factory=dict)
+    action: str = field(default="", metadata={"json": "action"})
+    data: dict[str, Any] = field(default_factory=dict, metadata={"json": "data", "omit": OmitEmpty.IF_FALSY})
 
     def __gojson__(self) -> str:  # for trace logging (Go Notification.String)
-        parts = ['"action":' + marshal(self.action)]
-        if self.data:  # omitempty
-            parts.append('"data":' + marshal(self.data))
-        return "{" + ",".join(parts) + "}"
+        return gojson_struct(self)
 
 
 @dataclass
@@ -48,124 +48,93 @@ class ConfigureRequest:
 # ---- JSON request/reply responses (__gojson__) ----
 @dataclass
 class InitBackfillResponse:
-    success: bool = False
-    message: str | None = None  # *string,omitempty
-    session_id: str = ""
-    job_id: str = ""
+    success: bool = field(default=False, metadata={"json": "success"})
+    message: str | None = field(default=None, metadata={"json": "message", "omit": OmitEmpty.IF_NONE})
+    session_id: str = field(default="", metadata={"json": "sessionId"})
+    job_id: str = field(default="", metadata={"json": "jobId"})
 
     def __gojson__(self) -> str:
-        parts = ['"success":' + marshal(self.success)]
-        if self.message is not None:
-            parts.append('"message":' + marshal(self.message))
-        parts.append('"sessionId":' + marshal(self.session_id))
-        parts.append('"jobId":' + marshal(self.job_id))
-        return "{" + ",".join(parts) + "}"
+        return gojson_struct(self)
 
 
 @dataclass
 class ConfigureResponse:
-    success: bool = False
-    message: str | None = None  # *string,omitempty
-    masked_url: str | None = None  # *string,omitempty → maskedURL
-    session_id: str = ""
-    backfill: bool = False
+    success: bool = field(default=False, metadata={"json": "success"})
+    message: str | None = field(default=None, metadata={"json": "message", "omit": OmitEmpty.IF_NONE})
+    masked_url: str | None = field(default=None, metadata={"json": "maskedURL", "omit": OmitEmpty.IF_NONE})
+    session_id: str = field(default="", metadata={"json": "sessionId"})
+    backfill: bool = field(default=False, metadata={"json": "backfill"})
     log_path: str | None = None  # json:"-" — NOT serialized (triggers a separate sendlogs publish)
 
     def __gojson__(self) -> str:
-        parts = ['"success":' + marshal(self.success)]
-        if self.message is not None:
-            parts.append('"message":' + marshal(self.message))
-        if self.masked_url is not None:
-            parts.append('"maskedURL":' + marshal(self.masked_url))
-        parts.append('"sessionId":' + marshal(self.session_id))
-        parts.append('"backfill":' + marshal(self.backfill))
-        return "{" + ",".join(parts) + "}"
+        return gojson_struct(self)
 
 
 @dataclass
 class DriverConfigResponse:
-    drivers: dict[str, DriverConfigurator] = field(default_factory=dict)
-    session_id: str = ""
+    drivers: dict[str, DriverConfigurator] = field(default_factory=dict, metadata={"json": "drivers"})
+    session_id: str = field(default="", metadata={"json": "sessionId"})
 
     def __gojson__(self) -> str:
-        return '{"drivers":' + marshal(self.drivers) + ',"sessionId":' + marshal(self.session_id) + "}"
+        return gojson_struct(self)
 
 
 @dataclass
 class ValidateResponse:
-    success: bool = False
-    message: str = ""  # plain string,omitempty — JSON key is the TYPO `messsage`
-    field_errors: list[FieldError] = field(default_factory=list)
-    session_id: str = ""
-    url: str = ""
+    success: bool = field(default=False, metadata={"json": "success"})
+    # PARITY: Go json tag typo (3 s's); plain-string omitempty.
+    message: str = field(default="", metadata={"json": "messsage", "omit": OmitEmpty.IF_FALSY})
+    field_errors: list[FieldError] = field(
+        default_factory=list, metadata={"json": "field_errors", "omit": OmitEmpty.IF_FALSY}
+    )
+    session_id: str = field(default="", metadata={"json": "sessionId"})
+    url: str = field(default="", metadata={"json": "url", "omit": OmitEmpty.IF_FALSY})
 
     def __gojson__(self) -> str:
-        parts = ['"success":' + marshal(self.success)]
-        if self.message:  # omitempty
-            parts.append('"messsage":' + marshal(self.message))  # PARITY: Go json tag typo (3 s's)
-        if self.field_errors:  # omitempty
-            parts.append('"field_errors":' + marshal(self.field_errors))
-        parts.append('"sessionId":' + marshal(self.session_id))
-        if self.url:  # omitempty
-            parts.append('"url":' + marshal(self.url))
-        return "{" + ",".join(parts) + "}"
+        return gojson_struct(self)
 
 
 # ---- msgpack fire-and-forget responses (to_msgpack) ----
 @dataclass
 class SendLogsResponse:
-    path: str = ""
-    session_id: str = ""
+    path: str = field(default="", metadata={"json": "path"})
+    session_id: str = field(default="", metadata={"json": "sessionId"})
 
     def to_msgpack(self) -> dict[str, Any]:
-        return {"path": self.path, "sessionId": self.session_id}
+        return msgpack_dict(self)
 
 
 @dataclass
 class GenericResponse:
-    success: bool = False
-    message: str | None = None  # *string,omitempty — None omits, "" emits (publishSimpleStatus sends "")
-    session_id: str = ""
-    action: str = ""
+    success: bool = field(default=False, metadata={"json": "success"})
+    # *string,omitempty — None omits, "" emits (publishSimpleStatus sends "")
+    message: str | None = field(default=None, metadata={"json": "message", "omit": OmitEmpty.IF_NONE})
+    session_id: str = field(default="", metadata={"json": "sessionId"})
+    action: str = field(default="", metadata={"json": "action"})
 
     def to_msgpack(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"success": self.success}
-        if self.message is not None:
-            d["message"] = self.message
-        d["sessionId"] = self.session_id
-        d["action"] = self.action
-        return d
+        return msgpack_dict(self)
 
 
 @dataclass
 class ImportResponse:
-    success: bool = False
-    message: str | None = None  # *string,omitempty
-    session_id: str = ""
+    success: bool = field(default=False, metadata={"json": "success"})
+    message: str | None = field(default=None, metadata={"json": "message", "omit": OmitEmpty.IF_NONE})
+    session_id: str = field(default="", metadata={"json": "sessionId"})
     log_path: str | None = None  # msgpack:"-" — NOT serialized
-    job_id: str = ""
+    job_id: str = field(default="", metadata={"json": "jobId"})
 
     def to_msgpack(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"success": self.success}
-        if self.message is not None:
-            d["message"] = self.message
-        d["sessionId"] = self.session_id
-        d["jobId"] = self.job_id
-        return d
+        return msgpack_dict(self)
 
 
 @dataclass
 class UpgradeResponse:
-    success: bool = False
-    message: str = ""  # plain string,omitempty
-    session_id: str = ""
+    success: bool = field(default=False, metadata={"json": "success"})
+    message: str = field(default="", metadata={"json": "message", "omit": OmitEmpty.IF_FALSY})  # plain-string omitempty
+    session_id: str = field(default="", metadata={"json": "sessionId"})
     log_path: str | None = None  # msgpack:"-" — NOT serialized
-    version: str = ""
+    version: str = field(default="", metadata={"json": "version"})
 
     def to_msgpack(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"success": self.success}
-        if self.message:  # omitempty
-            d["message"] = self.message
-        d["sessionId"] = self.session_id
-        d["version"] = self.version
-        return d
+        return msgpack_dict(self)

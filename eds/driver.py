@@ -18,6 +18,7 @@ from typing import Any, Protocol, runtime_checkable
 from eds.dbchange import DBChangeEvent
 from eds.schema import DatabaseSchema, Schema, SchemaMap, SchemaRegistry, SchemaValidator
 from eds.util.gojson import marshal
+from eds.util.gostruct import OmitEmpty, gojson_struct
 from eds.util.logger import Logger
 
 
@@ -75,22 +76,15 @@ class ImporterConfig:
 class DriverField:
     """PARITY: driver.go DriverField (JSON order: name, type, format?, default?, description, required)."""
 
-    name: str = ""
-    type: str = DriverType.STRING
-    format: str | None = None  # omitempty (omit when empty/None)
-    default: str | None = None  # *string, omitempty (omit when None)
-    description: str = ""
-    required: bool = False
+    name: str = field(default="", metadata={"json": "name"})
+    type: str = field(default=DriverType.STRING, metadata={"json": "type"})
+    format: str | None = field(default=None, metadata={"json": "format", "omit": OmitEmpty.IF_FALSY})
+    default: str | None = field(default=None, metadata={"json": "default", "omit": OmitEmpty.IF_NONE})  # *string
+    description: str = field(default="", metadata={"json": "description"})
+    required: bool = field(default=False, metadata={"json": "required"})
 
     def __gojson__(self) -> str:
-        parts = ['"name":' + marshal(self.name), '"type":' + marshal(self.type)]
-        if self.format:
-            parts.append('"format":' + marshal(self.format))
-        if self.default is not None:
-            parts.append('"default":' + marshal(self.default))
-        parts.append('"description":' + marshal(self.description))
-        parts.append('"required":' + marshal(self.required))
-        return "{" + ",".join(parts) + "}"
+        return gojson_struct(self)
 
 
 class FieldError(Exception):
@@ -124,36 +118,27 @@ def new_field_error(field: str, message: str) -> FieldError:
 class DriverMetadata:
     """PARITY: driver.go DriverMetadata."""
 
-    scheme: str = ""
-    name: str = ""
-    description: str = ""
-    example_url: str = ""
-    help: str = ""
-    supports_import: bool = False
-    supports_migration: bool = False
+    scheme: str = field(default="", metadata={"json": "scheme"})
+    name: str = field(default="", metadata={"json": "name"})
+    description: str = field(default="", metadata={"json": "description"})
+    example_url: str = field(default="", metadata={"json": "exampleURL"})
+    help: str = field(default="", metadata={"json": "help"})
+    supports_import: bool = field(default=False, metadata={"json": "supportsImport"})
+    supports_migration: bool = field(default=False, metadata={"json": "supportsMigration"})
 
     def __gojson__(self) -> str:
-        return (
-            '{"scheme":' + marshal(self.scheme)
-            + ',"name":' + marshal(self.name)
-            + ',"description":' + marshal(self.description)
-            + ',"exampleURL":' + marshal(self.example_url)
-            + ',"help":' + marshal(self.help)
-            + ',"supportsImport":' + marshal(self.supports_import)
-            + ',"supportsMigration":' + marshal(self.supports_migration)
-            + "}"
-        )
+        return gojson_struct(self)
 
 
 @dataclass
 class DriverConfigurator:
     """PARITY: driver.go DriverConfigurator."""
 
-    metadata: DriverMetadata = field(default_factory=DriverMetadata)
-    fields: list[DriverField] = field(default_factory=list)
+    metadata: DriverMetadata = field(default_factory=DriverMetadata, metadata={"json": "metadata"})
+    fields: list[DriverField] = field(default_factory=list, metadata={"json": "fields"})
 
     def __gojson__(self) -> str:
-        return '{"metadata":' + marshal(self.metadata) + ',"fields":' + marshal(self.fields) + "}"
+        return gojson_struct(self)
 
 
 # ---- capability protocols (runtime_checkable: the registry does isinstance checks) -----------------

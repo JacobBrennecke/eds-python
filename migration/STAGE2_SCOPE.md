@@ -128,6 +128,18 @@ don't fight. WS1 alone delivers the realistic idiomatic gain; WS2 is the one jud
 
 - **WS0** — scope + do-not-touch inventory authored. **Decision: WS1 + WS2 (full) approved** (do the low-risk
   sweeps, then the declarative serializer DTO-by-DTO behind byte-diffs).
+- **WS2** — declarative serializer DONE (632 tests, ruff+mypy clean; byte-identical). New `eds/util/gostruct.py`
+  (OmitEmpty NEVER/IF_NONE/IF_FALSY/IF_EMPTY_RAW + gojson_struct + msgpack_dict over the untouched marshal). Added
+  `tests/test_ws2_serialization.py` (10 byte-snapshots for the previously-untested DTOs) FIRST as the golden-before.
+  Migrated all 24 DTOs to `field(metadata={"json","omit"})` + a `return gojson_struct(self)`/`msgpack_dict(self)`
+  body: notification(9), schema(3), driver(3 — DriverField/DriverMetadata/DriverConfigurator), dbchange(1, incl
+  IF_EMPTY_RAW before/after + key-null), api(4), metrics(4), sysinfo(2), batcher Record(1). FieldError kept
+  hand-rolled (it's an Exception, not a dataclass). Every quirk reproduced via metadata: messsage typo, maskedURL,
+  $comment, hostid/num_cpu/go_version, *bool-false-emits-vs-value-false-omits, log_path SKIP, before/after
+  compact_raw-via-marshal. The heartbeat's SystemStats.__gojson__() seam preserved. **Review: clean (0 HIGH/MED,
+  0 confirmed; 1 LOW informational).** Intentional hand-rolled exclusions (correct, no byte change): `FieldError`
+  (an Exception, not a dataclass) and `import_client.TableExportInfo` (has a `datetime` field marshal can't encode).
+  msgpack key-order locked by an explicit order test (==dict is order-insensitive but packb isn't). 633 tests.
 - **WS1** — DONE (622 tests, ruff+mypy clean). 4 NamedTuples: `ValidationResult` (schema.py + util/schema.py +
   the batch_processor/importer call sites), `ImportRunResult` (notification_wiring `_run_import`), `KeyPairUrl`
   (snowflake_keypair; `secret_var: str` — gourl `Values.get` returns "", not None), `CrdbExportFile` (crdb). All

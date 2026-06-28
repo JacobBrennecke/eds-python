@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from eds.dbchange import DBChangeEvent
 from eds.util import gojson
+from eds.util.gostruct import gojson_struct
 
 
 @dataclass
@@ -13,11 +14,12 @@ class Record:
     """PARITY: batcher.go Record. JSON is declaration field order (table,id,operation,diff,object);
     ``event`` is json:"-" (excluded). ``object`` is a map → marshaled with sorted keys."""
 
-    table: str = ""
-    id: str = ""
-    operation: str = ""
-    diff: list[str] | None = None
-    object: dict | None = None
+    table: str = field(default="", metadata={"json": "table"})
+    id: str = field(default="", metadata={"json": "id"})
+    operation: str = field(default="", metadata={"json": "operation"})
+    diff: list[str] | None = field(default=None, metadata={"json": "diff"})  # NEVER (null when None)
+    object: dict | None = field(default=None, metadata={"json": "object"})  # NEVER (null); dict → sorted keys
+    # event is json:"-" (no metadata → SKIP).
     event: DBChangeEvent | None = field(default=None, repr=False, compare=False)
 
     def __str__(self) -> str:
@@ -25,15 +27,7 @@ class Record:
         return gojson.stringify(self)
 
     def __gojson__(self) -> str:
-        return "{" + ",".join(
-            [
-                '"table":' + gojson.marshal(self.table),
-                '"id":' + gojson.marshal(self.id),
-                '"operation":' + gojson.marshal(self.operation),
-                '"diff":' + gojson.marshal(self.diff),
-                '"object":' + gojson.marshal(self.object),
-            ]
-        ) + "}"
+        return gojson_struct(self)
 
 
 class Batcher:

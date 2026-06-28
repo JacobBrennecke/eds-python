@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from eds.util.gojson import RawJson, compact_raw, marshal
+from eds.util.gojson import RawJson, marshal
+from eds.util.gostruct import OmitEmpty, gojson_struct
 
 
 @dataclass
@@ -14,20 +15,22 @@ class DBChangeEvent:
     via __gojson__ — NOT sorted like a map. before/after (json.RawMessage) are compacted + HTML-escaped on
     emit (compact_raw), exactly as Go's json.Marshal renders a RawMessage field."""
 
-    operation: str = ""
-    id: str = ""
-    table: str = ""
-    key: list[str] | None = None  # Go []string, no omitempty: nil -> "null", [] -> "[]"
-    model_version: str = ""
-    company_id: str | None = None
-    location_id: str | None = None
-    user_id: str | None = None
-    before: RawJson | None = None
-    after: RawJson | None = None
-    diff: list[str] | None = None
-    timestamp: int = 0
-    mvcc_timestamp: str = ""
-    imported: bool = False
+    operation: str = field(default="", metadata={"json": "operation"})
+    id: str = field(default="", metadata={"json": "id"})
+    table: str = field(default="", metadata={"json": "table"})
+    # Go []string, no omitempty: nil -> "null", [] -> "[]" (NEVER).
+    key: list[str] | None = field(default=None, metadata={"json": "key"})
+    model_version: str = field(default="", metadata={"json": "modelVersion"})
+    company_id: str | None = field(default=None, metadata={"json": "companyId", "omit": OmitEmpty.IF_NONE})
+    location_id: str | None = field(default=None, metadata={"json": "locationId", "omit": OmitEmpty.IF_NONE})
+    user_id: str | None = field(default=None, metadata={"json": "userId", "omit": OmitEmpty.IF_NONE})
+    # before/after (json.RawMessage): omit when None or empty; marshal(RawJson) compacts+HTML-escapes via compact_raw.
+    before: RawJson | None = field(default=None, metadata={"json": "before", "omit": OmitEmpty.IF_EMPTY_RAW})
+    after: RawJson | None = field(default=None, metadata={"json": "after", "omit": OmitEmpty.IF_EMPTY_RAW})
+    diff: list[str] | None = field(default=None, metadata={"json": "diff", "omit": OmitEmpty.IF_FALSY})
+    timestamp: int = field(default=0, metadata={"json": "timestamp"})
+    mvcc_timestamp: str = field(default="", metadata={"json": "mvccTimestamp"})
+    imported: bool = field(default=False, metadata={"json": "imported", "omit": OmitEmpty.IF_FALSY})
 
     # Not serialized (Go json:"-" / unexported):
     nats_msg: object = field(default=None, repr=False, compare=False)
@@ -83,31 +86,9 @@ class DBChangeEvent:
         return self.__gojson__()
 
     def __gojson__(self) -> str:
-        parts: list[str] = [
-            '"operation":' + marshal(self.operation),
-            '"id":' + marshal(self.id),
-            '"table":' + marshal(self.table),
-            '"key":' + marshal(self.key),  # no omitempty: always present (nil -> null)
-            '"modelVersion":' + marshal(self.model_version),
-        ]
-        if self.company_id is not None:
-            parts.append('"companyId":' + marshal(self.company_id))
-        if self.location_id is not None:
-            parts.append('"locationId":' + marshal(self.location_id))
-        if self.user_id is not None:
-            parts.append('"userId":' + marshal(self.user_id))
-        # PARITY: json.Marshal compacts + HTML-escapes a RawMessage field (it is NOT emitted verbatim).
-        if self.before is not None and len(self.before.value) > 0:
-            parts.append('"before":' + compact_raw(self.before.value))
-        if self.after is not None and len(self.after.value) > 0:
-            parts.append('"after":' + compact_raw(self.after.value))
-        if self.diff:  # omitempty: nil/empty slice omitted
-            parts.append('"diff":' + marshal(self.diff))
-        parts.append('"timestamp":' + marshal(self.timestamp))
-        parts.append('"mvccTimestamp":' + marshal(self.mvcc_timestamp))
-        if self.imported:  # omitempty bool: omitted when false
-            parts.append('"imported":' + marshal(self.imported))
-        return "{" + ",".join(parts) + "}"
+        # PARITY: declaration order + per-field omitempty; before/after RawJson route through marshal→compact_raw
+        # (compacted + HTML-escaped, NOT emitted verbatim).
+        return gojson_struct(self)
 
     @classmethod
     def from_message(cls, data: bytes, seq: int = 0) -> DBChangeEvent:

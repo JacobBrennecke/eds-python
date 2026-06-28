@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from eds.util.gojson import marshal
+from eds.util.gostruct import OmitEmpty, gojson_struct
 
 # PARITY: api.GetAPIURL table — case-sensitive, exact match, no default (https for P/S/E, http for L).
 _API_URLS: dict[str, str] = {
@@ -37,59 +37,42 @@ def get_api_url(first_letter: str) -> str:
 class DriverMeta:
     """PARITY: api.DriverMeta. ``url`` is masked upstream (server.go util.MaskURL) — may contain secrets."""
 
-    id: str = ""
-    name: str = ""
-    description: str = ""
-    url: str = ""
+    id: str = field(default="", metadata={"json": "id"})
+    name: str = field(default="", metadata={"json": "name"})
+    description: str = field(default="", metadata={"json": "description"})
+    url: str = field(default="", metadata={"json": "url"})
 
     def __gojson__(self) -> str:
-        return (
-            '{"id":' + marshal(self.id)
-            + ',"name":' + marshal(self.name)
-            + ',"description":' + marshal(self.description)
-            + ',"url":' + marshal(self.url)
-            + "}"
-        )
+        return gojson_struct(self)
 
 
 @dataclass
 class SessionStart:
     """PARITY: api.SessionStart (request body)."""
 
-    version: str = ""
-    hostname: str = ""
-    ip_address: str = ""
-    machine_id: str = ""
-    os_info: object | None = None  # `any`, NO omitempty → always present (null when None)
-    driver: DriverMeta | None = None  # *DriverMeta,omitempty
-    server_id: str = ""
-    company_ids: list[str] | None = None  # []string,omitempty (omit when None OR [])
+    version: str = field(default="", metadata={"json": "version"})
+    hostname: str = field(default="", metadata={"json": "hostname"})
+    ip_address: str = field(default="", metadata={"json": "ipAddress"})
+    machine_id: str = field(default="", metadata={"json": "machineId"})
+    # `any`, NO omitempty → always present (osinfo is lowercase; null when None); stays a __gojson__ struct, not a dict.
+    os_info: object | None = field(default=None, metadata={"json": "osinfo"})
+    driver: DriverMeta | None = field(default=None, metadata={"json": "driver", "omit": OmitEmpty.IF_NONE})
+    server_id: str = field(default="", metadata={"json": "serverId"})
+    company_ids: list[str] | None = field(default=None, metadata={"json": "companyIds", "omit": OmitEmpty.IF_FALSY})
 
     def __gojson__(self) -> str:
-        parts = [
-            '"version":' + marshal(self.version),
-            '"hostname":' + marshal(self.hostname),
-            '"ipAddress":' + marshal(self.ip_address),
-            '"machineId":' + marshal(self.machine_id),
-            '"osinfo":' + marshal(self.os_info),
-        ]
-        if self.driver is not None:
-            parts.append('"driver":' + self.driver.__gojson__())
-        parts.append('"serverId":' + marshal(self.server_id))
-        if self.company_ids:  # omitempty: None or [] omitted
-            parts.append('"companyIds":' + marshal(self.company_ids))
-        return "{" + ",".join(parts) + "}"
+        return gojson_struct(self)
 
 
 @dataclass
 class EdsSession:
     """PARITY: api.EdsSession. credential is *string with NO omitempty → always emitted (null when None)."""
 
-    session_id: str = ""
-    credential: str | None = None
+    session_id: str = field(default="", metadata={"json": "sessionId"})
+    credential: str | None = field(default=None, metadata={"json": "credential"})  # *string, NO omitempty (null)
 
     def __gojson__(self) -> str:
-        return '{"sessionId":' + marshal(self.session_id) + ',"credential":' + marshal(self.credential) + "}"
+        return gojson_struct(self)
 
     @classmethod
     def from_dict(cls, m: dict) -> EdsSession:
@@ -117,10 +100,10 @@ class SessionStartResponse:
 class SessionEnd:
     """PARITY: api.SessionEnd (request body)."""
 
-    errored: bool = False
+    errored: bool = field(default=False, metadata={"json": "errored"})
 
     def __gojson__(self) -> str:
-        return '{"errored":' + marshal(self.errored) + "}"
+        return gojson_struct(self)
 
 
 @dataclass

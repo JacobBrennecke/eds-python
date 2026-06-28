@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple, Protocol
 
-from eds.util.gojson import marshal
+from eds.util.gostruct import OmitEmpty, gojson_struct
 
 if TYPE_CHECKING:
     from eds.dbchange import DBChangeEvent
@@ -19,35 +19,32 @@ if TYPE_CHECKING:
 class ItemsType:
     """PARITY: schema.go ItemsType."""
 
-    type: str = ""
-    enum: list[str] | None = None
-    format: str = ""
+    type: str = field(default="", metadata={"json": "type"})
+    enum: list[str] | None = field(default=None, metadata={"json": "enum", "omit": OmitEmpty.IF_FALSY})
+    format: str = field(default="", metadata={"json": "format", "omit": OmitEmpty.IF_FALSY})
 
     @classmethod
     def from_dict(cls, d: dict) -> ItemsType:
         return cls(type=d.get("type", ""), enum=d.get("enum"), format=d.get("format", ""))
 
     def __gojson__(self) -> str:
-        # PARITY: schema.go ItemsType struct marshaling — declaration order + omitempty.
-        parts = ['"type":' + marshal(self.type)]
-        if self.enum:
-            parts.append('"enum":' + marshal(self.enum))
-        if self.format:
-            parts.append('"format":' + marshal(self.format))
-        return "{" + ",".join(parts) + "}"
+        return gojson_struct(self)
 
 
 @dataclass
 class SchemaProperty:
     """PARITY: schema.go SchemaProperty."""
 
-    type: str = ""
-    format: str = ""
-    nullable: bool = False
-    items: ItemsType | None = None
-    additional_properties: bool | None = None  # json: additionalProperties
-    comment: str | None = None  # json: $comment
-    deprecated: bool | None = None
+    type: str = field(default="", metadata={"json": "type"})
+    format: str = field(default="", metadata={"json": "format", "omit": OmitEmpty.IF_FALSY})
+    nullable: bool = field(default=False, metadata={"json": "nullable", "omit": OmitEmpty.IF_FALSY})
+    items: ItemsType | None = field(default=None, metadata={"json": "items", "omit": OmitEmpty.IF_NONE})
+    # *bool/*string,omitempty — present-but-False/empty still emits; only None omits.
+    additional_properties: bool | None = field(
+        default=None, metadata={"json": "additionalProperties", "omit": OmitEmpty.IF_NONE}
+    )
+    comment: str | None = field(default=None, metadata={"json": "$comment", "omit": OmitEmpty.IF_NONE})
+    deprecated: bool | None = field(default=None, metadata={"json": "deprecated", "omit": OmitEmpty.IF_NONE})
 
     def is_not_null(self) -> bool:
         """PARITY: SchemaProperty.IsNotNull — not nullable, or an array."""
@@ -71,33 +68,19 @@ class SchemaProperty:
         )
 
     def __gojson__(self) -> str:
-        # PARITY: schema.go SchemaProperty struct marshaling — declaration order + omitempty.
-        parts = ['"type":' + marshal(self.type)]
-        if self.format:
-            parts.append('"format":' + marshal(self.format))
-        if self.nullable:
-            parts.append('"nullable":' + marshal(self.nullable))
-        if self.items is not None:
-            parts.append('"items":' + self.items.__gojson__())
-        if self.additional_properties is not None:
-            parts.append('"additionalProperties":' + marshal(self.additional_properties))
-        if self.comment is not None:
-            parts.append('"$comment":' + marshal(self.comment))
-        if self.deprecated is not None:
-            parts.append('"deprecated":' + marshal(self.deprecated))
-        return "{" + ",".join(parts) + "}"
+        return gojson_struct(self)
 
 
 @dataclass
 class Schema:
     """PARITY: schema.go Schema."""
 
-    properties: dict[str, SchemaProperty] = field(default_factory=dict)
-    required: list[str] = field(default_factory=list)
-    primary_keys: list[str] = field(default_factory=list)
-    table: str = ""
-    model_version: str = ""
-    _columns: list[str] | None = field(default=None, repr=False, compare=False)
+    properties: dict[str, SchemaProperty] = field(default_factory=dict, metadata={"json": "properties"})
+    required: list[str] = field(default_factory=list, metadata={"json": "required"})
+    primary_keys: list[str] = field(default_factory=list, metadata={"json": "primaryKeys"})
+    table: str = field(default="", metadata={"json": "table"})
+    model_version: str = field(default="", metadata={"json": "modelVersion"})
+    _columns: list[str] | None = field(default=None, repr=False, compare=False)  # json:"-" (no metadata → SKIP)
 
     def columns(self) -> list[str]:
         """PARITY: Schema.Columns — primary keys (in order) followed by the remaining property names
@@ -109,17 +92,9 @@ class Schema:
         return self._columns
 
     def __gojson__(self) -> str:
-        # PARITY: schema.go Schema struct marshaling — declaration order (properties, required, primaryKeys,
-        # table, modelVersion); no omitempty; the cached `_columns` is excluded (json:"-"). `properties` is a
-        # map → marshaled with sorted keys.
-        return (
-            '{"properties":' + marshal(self.properties)
-            + ',"required":' + marshal(self.required)
-            + ',"primaryKeys":' + marshal(self.primary_keys)
-            + ',"table":' + marshal(self.table)
-            + ',"modelVersion":' + marshal(self.model_version)
-            + "}"
-        )
+        # PARITY: declaration order (properties, required, primaryKeys, table, modelVersion); no omitempty; the
+        # cached `_columns` is excluded (json:"-"). `properties` is a map → marshaled with sorted keys.
+        return gojson_struct(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> Schema:

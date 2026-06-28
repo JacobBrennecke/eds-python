@@ -20,7 +20,7 @@ from typing import Any, Protocol
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 
-from eds.util.gojson import marshal
+from eds.util.gostruct import gojson_struct
 
 _FLUSH_DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
 _FLUSH_COUNT_BUCKETS = [1, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
@@ -31,76 +31,52 @@ _PROCESSING_DURATION_BUCKETS = [1, 2, 3, 5, 10, 60, 300, 600, 1800, 3600]
 class MemoryStat:
     """PARITY: gopsutil mem.VirtualMemoryStat (subset — see metrics-memory-load-partial)."""
 
-    total: int = 0
-    available: int = 0
-    used: int = 0
-    used_percent: float = 0.0
-    free: int = 0
+    total: int = field(default=0, metadata={"json": "total"})
+    available: int = field(default=0, metadata={"json": "available"})
+    used: int = field(default=0, metadata={"json": "used"})
+    used_percent: float = field(default=0.0, metadata={"json": "usedPercent"})
+    free: int = field(default=0, metadata={"json": "free"})
 
     def __gojson__(self) -> str:
-        return (
-            '{"total":' + marshal(self.total)
-            + ',"available":' + marshal(self.available)
-            + ',"used":' + marshal(self.used)
-            + ',"usedPercent":' + marshal(self.used_percent)
-            + ',"free":' + marshal(self.free)
-            + "}"
-        )
+        return gojson_struct(self)
 
 
 @dataclass
 class LoadStat:
     """PARITY: gopsutil load.AvgStat."""
 
-    load1: float = 0.0
-    load5: float = 0.0
-    load15: float = 0.0
+    load1: float = field(default=0.0, metadata={"json": "load1"})
+    load5: float = field(default=0.0, metadata={"json": "load5"})
+    load15: float = field(default=0.0, metadata={"json": "load15"})
 
     def __gojson__(self) -> str:
-        return (
-            '{"load1":' + marshal(self.load1)
-            + ',"load5":' + marshal(self.load5)
-            + ',"load15":' + marshal(self.load15)
-            + "}"
-        )
+        return gojson_struct(self)
 
 
 @dataclass
 class MetricsSnapshot:
     """PARITY: the anonymous Metrics struct in SystemStats (declaration order = JSON order)."""
 
-    flush_count: float = 0.0
-    flush_duration: float = 0.0
-    processing_duration: float = 0.0
-    pending_events: float = 0.0
-    total_events: float = 0.0
+    flush_count: float = field(default=0.0, metadata={"json": "flushCount"})
+    flush_duration: float = field(default=0.0, metadata={"json": "flushDuration"})
+    processing_duration: float = field(default=0.0, metadata={"json": "processingDuration"})
+    pending_events: float = field(default=0.0, metadata={"json": "pendingEvents"})
+    total_events: float = field(default=0.0, metadata={"json": "totalEvents"})
 
     def __gojson__(self) -> str:
-        return (
-            '{"flushCount":' + marshal(self.flush_count)
-            + ',"flushDuration":' + marshal(self.flush_duration)
-            + ',"processingDuration":' + marshal(self.processing_duration)
-            + ',"pendingEvents":' + marshal(self.pending_events)
-            + ',"totalEvents":' + marshal(self.total_events)
-            + "}"
-        )
+        return gojson_struct(self)
 
 
 @dataclass
 class SystemStats:
     """PARITY: metrics.go SystemStats."""
 
-    metrics: MetricsSnapshot = field(default_factory=MetricsSnapshot)
-    memory: MemoryStat | None = None
-    load: LoadStat | None = None
+    metrics: MetricsSnapshot = field(default_factory=MetricsSnapshot, metadata={"json": "metrics"})
+    memory: MemoryStat | None = field(default=None, metadata={"json": "memory"})  # NEVER (null when None)
+    load: LoadStat | None = field(default=None, metadata={"json": "load"})  # NEVER (null when None)
 
     def __gojson__(self) -> str:
-        return (
-            '{"metrics":' + marshal(self.metrics)
-            + ',"memory":' + marshal(self.memory)
-            + ',"load":' + marshal(self.load)
-            + "}"
-        )
+        return gojson_struct(self)
 
 
 class SystemResourceProvider(Protocol):
