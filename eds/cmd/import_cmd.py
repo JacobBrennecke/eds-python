@@ -103,7 +103,11 @@ def run_import_command(args: argparse.Namespace) -> int:
         api_url = args.api_url
         logger.info("using alternative API url: %s", api_url)
 
-    tracker = new_tracker(data_dir, logger)
+    try:
+        tracker = new_tracker(data_dir, logger)
+    except Exception as e:  # noqa: BLE001 — PARITY: tracker create failure is Fatal (exit 1)
+        logger.error("error creating tracker: %s", e)
+        return EXIT_ERROR
     try:
         validator = load_schema_validator(args, logger)
         try:
@@ -141,7 +145,11 @@ def _do_import(  # noqa: C901 — faithful to importCmd.Run's single body
     if args.validate_only:  # the control-plane "configure" validate path
         return EXIT_SUCCESS
 
-    importer = new_importer(None, logger, driver_url, registry)
+    try:
+        importer = new_importer(None, logger, driver_url, registry)
+    except Exception as e:  # noqa: BLE001 — PARITY: NewImporter failure is Fatal (exit 1)
+        logger.error("error creating importer: %s", e)
+        return EXIT_ERROR
     skip_delete_confirm = isinstance(importer, ImporterHelp) and not importer.supports_delete()
 
     only = args.only or []
@@ -229,7 +237,7 @@ def _do_import(  # noqa: C901 — faithful to importCmd.Run's single body
         success = True
         logger.info("👋 Loaded %d tables in %.1fs", len(tables), time.monotonic() - started)
         return EXIT_SUCCESS
-    except (RuntimeError, OSError) as e:  # createExportJob/poll/download/mkdir/getLatestSchema failures → exit 1
+    except Exception as e:  # noqa: BLE001 — PARITY: all run-body failures are Fatal/Error → exit 1 (not panic)
         logger.error("import failed: %s", e)
         return EXIT_ERROR
     finally:

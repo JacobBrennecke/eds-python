@@ -24,6 +24,7 @@ from eds.cmd.exit_codes import (
     EXIT_RESTART,
     EXIT_SUCCESS,
 )
+from eds.cmd.import_client import parse_rfc3339
 from eds.cmd.loopback import LoopbackServer
 from eds.consumer.config import ConsumerConfig
 from eds.consumer.consumer import Consumer
@@ -52,7 +53,7 @@ def _load_table_export_info(tracker: Any) -> dict[str, datetime | None] | None:
             out[table] = None
             continue
         try:
-            out[table] = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            out[table] = parse_rfc3339(str(ts))  # robust to Go's trimmed-fraction RFC3339Nano
         except ValueError:
             out[table] = None
     return out

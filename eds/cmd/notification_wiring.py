@@ -3,18 +3,21 @@
 The Layer-2 control plane is synchronous (it blocks on subprocess fork); the notification consumer is asyncio.
 NotificationRunner drives the async NotificationConsumer on a background event loop and exposes sync
 start/stop/publish_send_logs_response + the renew/log tickers. build_notification_handler wires the control-plane
-closures: the feasible actions hit the Layer-3 fork's loopback /control/* or call a local module; the actions whose
-dependencies are not yet ported (upgrade/configure/import/backfill-real) return a Success=false "not yet ported"
-response so the wire contract stays intact.
+closures: configure/import/backfill fork `eds import` (runImport); the remaining feasible actions hit the Layer-3
+fork's loopback /control/* or call a local module; upgrade (and configure's config.toml persist) stay deferred.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import threading
 from dataclasses import dataclass
+from typing import Any
 
+from eds.cmd.exit_codes import EXIT_INCORRECT_USAGE, EXIT_SUCCESS
+from eds.cmd.import_client import create_export_job
 from eds.cmd.session import get_log_upload_url, upload_log_file
 from eds.driver import get_driver_configurations
 from eds.driver import validate as driver_validate
@@ -32,8 +35,79 @@ from eds.notification.dtos import (
     ValidateResponse,
 )
 from eds.util.logger import Logger
+from eds.util.mask import mask, mask_url
+from eds.util.process import ForkArgs, fork
 
 _NOT_PORTED = "not yet ported in the Python EDS port"
+
+
+def _run_import(
+    ctx: ControlPlaneContext, url: str, schema_only: bool, validate_only: bool, job_id: str
+) -> tuple[bool, bool, str | None, str | None]:
+    """PARITY: runImport (server.go:759-836) — fork `eds import`; returns (success, validated, message, logPath)."""
+    importargs = ["--url", url, "--api-key", ctx.api_key, "--no-confirm", "--data-dir", ctx.data_dir]
+    if schema_only:
+        importargs.append("--schema-only")
+    if job_id:
+        importargs += ["--job-id", job_id]
+    if validate_only:
+        importargs += ["--validate-only", "--silent"]
+        ctx.logger.info("configuring the driver, one moment please...")
+    else:
+        # PARITY: Go emits --verbose=<bool> (pflag accepts =value); argparse store_true rejects =value, so emit a
+        # bare --verbose only when on (and nothing when off) — same effect, parseable by `eds import`.
+        if ctx.verbose:
+            importargs.append("--verbose")
+        ctx.logger.info("running import process ... (duration will vary based on the amount of data being exported)")
+
+    forker = ctx.forker or fork
+    try:
+        result = forker(
+            ForkArgs(
+                command="import", args=importargs, log_filename_label="import", save_logs=True,
+                forward_interrupt=True, write_to_std=False, dir=ctx.session_dir, log=ctx.logger,
+            )
+        )
+    except Exception:  # noqa: BLE001 — Go: err && result==nil
+        result = None
+    if result is None:
+        return True, False, "Error importing data. Please contact support for assistance.", None
+
+    ec = result.exit_code
+    ctx.logger.debug("import exit code: %d, last log line: %s", ec, result.last_error_lines)
+    if ctx.no_restart:
+        sys.exit(ec)
+    if ec == EXIT_SUCCESS:
+        return True, True, None, None
+    if ec == EXIT_INCORRECT_USAGE:  # the url is invalid
+        lines = result.last_error_lines.rstrip("\n").split("\n")
+        msg = lines[-1] if len(lines) > 1 else result.last_error_lines.strip()
+        return False, False, msg, None
+    # default failure: upload the import stdout/stderr logs
+    ctx.logger.error("import failed with exit code %d: %s", ec, result.last_error_lines)
+    upload_log_path = ""
+    try:
+        upload_url = get_log_upload_url(ctx.logger, ctx.api_url, ctx.api_key, ctx.session_id, version=ctx.version)
+    except Exception as e:  # noqa: BLE001
+        ctx.logger.error("failed to get upload URL: %s", e)
+    else:
+        stdout_file = os.path.join(ctx.session_dir, "import_stdout.txt")
+        if os.path.exists(stdout_file) and os.path.getsize(stdout_file) > 0:
+            try:
+                upload_log_path = upload_log_file(ctx.logger, upload_url, stdout_file, version=ctx.version)
+            except Exception as e:  # noqa: BLE001
+                ctx.logger.error("failed to upload stdout logfile: %s", e)
+        stderr_file = os.path.join(ctx.session_dir, "import_stderr.txt")
+        if os.path.exists(stderr_file) and os.path.getsize(stderr_file) > 0:
+            try:
+                upload_log_file(ctx.logger, upload_url, stderr_file, version=ctx.version)
+            except Exception as e:  # noqa: BLE001
+                ctx.logger.error("failed to upload stderr logfile: %s", e)
+    return (
+        True, False,
+        "Error importing data. See the error logs for more details or contact support for further assistance.",
+        upload_log_path,
+    )
 
 
 def is_nats_connection_error(e: BaseException) -> bool:
@@ -47,7 +121,7 @@ def is_nats_connection_error(e: BaseException) -> bool:
 
 @dataclass
 class ControlPlaneContext:
-    """Mutable Layer-2 state the handler closures capture (session_id + fork_running change per session)."""
+    """Mutable Layer-2 state the handler closures capture (session_id/session_dir/fork_running change per session)."""
 
     logger: Logger
     port: int
@@ -55,8 +129,15 @@ class ControlPlaneContext:
     api_key: str
     version: str
     keep_logs: bool
+    data_dir: str = ""
+    verbose: bool = False
+    no_restart: bool = False
+    driver_url: str = ""
+    configured: bool = False
     session_id: str = ""
+    session_dir: str = ""
     fork_running: bool = False
+    forker: Any = None  # injectable for tests; default eds.util.process.fork
 
 
 def _control_get(ctx: ControlPlaneContext, path: str) -> str:
@@ -132,18 +213,55 @@ def build_notification_handler(ctx: ControlPlaneContext) -> NotificationHandler:
             return None
 
     def configure(req: ConfigureRequest) -> ConfigureResponse:
-        # DEFERRED: needs runImport (cmd/import.go) + config.toml WRITE.
-        return ConfigureResponse(success=False, message=_NOT_PORTED, session_id=ctx.session_id, backfill=req.backfill)
+        # PARITY: configure (server.go:838-868) — validate the url via `import --validate-only`.
+        ctx.logger.trace("received driver configuration. url: %s", mask(req.url))  # PARITY: cstr.Mask for the trace
+        success, validated, msg, upload_log_path = _run_import(ctx, req.url, False, True, "")
+        masked_url = None
+        if success and validated:
+            # DEFERRED: persist the url to config.toml (no TOML writer yet); the change is in-memory only.
+            ctx.logger.warn("persisting the driver url to config.toml is not yet ported")
+            ctx.logger.info("driver configured successfully, waiting for import action...")
+            ctx.driver_url = req.url
+            try:
+                masked_url = mask_url(req.url)
+            except Exception as e:  # noqa: BLE001
+                ctx.logger.warn("could not mask URL, will not display in app: %s", e)
+            if not ctx.configured:
+                restart()
+        return ConfigureResponse(
+            session_id=ctx.session_id, success=validated, log_path=upload_log_path, masked_url=masked_url,
+            message=msg, backfill=req.backfill,
+        )
 
     def backfill_init(req: InitBackfillRequest) -> InitBackfillResponse:
+        ctx.logger.trace("received init backfill request")
         if not req.backfill:  # PARITY: backfill=false → success no-op
             return InitBackfillResponse(success=True, session_id=ctx.session_id)
-        # DEFERRED: createExportJob (POST /v3/export/bulk) not ported.
-        return InitBackfillResponse(success=False, message=_NOT_PORTED, session_id=ctx.session_id)
+        try:
+            job_id = create_export_job(
+                ctx.logger, ctx.api_url, ctx.api_key, tables=None, company_ids=None, location_ids=None,
+                time_offset_ms=None, version=ctx.version,
+            )
+        except Exception as e:  # noqa: BLE001
+            ctx.logger.error("failed to create export job: %s", e)
+            return InitBackfillResponse(success=False, message=str(e), session_id=ctx.session_id)
+        return InitBackfillResponse(success=True, job_id=job_id, session_id=ctx.session_id)
 
     def import_action(req: ImportRequest) -> ImportResponse:
-        # DEFERRED: needs runImport (cmd/import.go fork).
-        return ImportResponse(success=False, message=_NOT_PORTED, session_id=ctx.session_id, job_id=req.job_id)
+        # PARITY: importaction (server.go:884-898) — pause, fork `eds import`, then restart (or signal first-consumer).
+        ctx.logger.trace("received import action")
+        pause()
+        success, _validated, msg, upload_log_path = _run_import(
+            ctx, ctx.driver_url, not req.backfill, False, req.job_id
+        )
+        if not success:
+            return ImportResponse(success=False, message=msg, session_id=ctx.session_id, log_path=upload_log_path)
+        if not ctx.configured:
+            # DEFERRED: the configureChannel first-consumer gate (server.py requires --url so configured is True)
+            ctx.logger.trace("driver configured")
+        else:
+            restart()
+        return ImportResponse(success=success, message=msg, session_id=ctx.session_id, log_path=upload_log_path)
 
     def driver_config() -> DriverConfigResponse:
         return DriverConfigResponse(drivers=get_driver_configurations(), session_id=ctx.session_id)

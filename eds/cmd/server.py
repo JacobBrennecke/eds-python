@@ -177,7 +177,9 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
     base_args += ["--port", str(port), "--data-dir", data_dir, "--server", nats_url, "--api-url", api_url]
 
     ctx = ControlPlaneContext(
-        logger=logger, port=port, api_url=api_url, api_key=api_key, version=version, keep_logs=keep_logs
+        logger=logger, port=port, api_url=api_url, api_key=api_key, version=version, keep_logs=keep_logs,
+        data_dir=data_dir, verbose=args.verbose, no_restart=args.no_restart, driver_url=driver_url,
+        configured=bool(driver_url),
     )
     handler = build_notification_handler(ctx)
 
@@ -206,6 +208,7 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
             current_creds_file = creds_file
             logs_dir = os.path.join(session_dir, "logs")
             ctx.session_id = session_id
+            ctx.session_dir = session_dir
 
             runner = NotificationRunner(logger, nats_url, handler)
             try:

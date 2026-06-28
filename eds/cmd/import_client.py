@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -44,8 +45,22 @@ def _rfc3339(dt: datetime) -> str:
     dt = dt.astimezone(timezone.utc)
     s = dt.strftime("%Y-%m-%dT%H:%M:%S")
     if dt.microsecond:
-        s += ("." + f"{dt.microsecond:06d}").rstrip("0")
+        s += ("." + f"{dt.microsecond:06d}").rstrip("0")  # PARITY: Go RFC3339Nano trims trailing zeros
     return s + "Z"
+
+
+_FRAC_RE = re.compile(r"^(.*T\d{2}:\d{2}:\d{2})\.(\d+)(.*)$")
+
+
+def parse_rfc3339(s: str) -> datetime:
+    """Parse an RFC3339 timestamp with ARBITRARY fractional precision (Go time.Parse accepts any; datetime.from
+    isoformat on Python 3.10 needs 0/3/6 digits — normalize the fraction to 6 so trimmed values like ".5" parse)."""
+    s = s.replace("Z", "+00:00")
+    m = _FRAC_RE.match(s)
+    if m:
+        frac = (m.group(2) + "000000")[:6]
+        s = f"{m.group(1)}.{frac}{m.group(3)}"
+    return datetime.fromisoformat(s)
 
 
 def _nanos_to_dt(unix_nanos: int) -> datetime:
@@ -126,7 +141,7 @@ def load_table_export_info(tracker: Any) -> list[TableExportInfo] | None:
     out: list[TableExportInfo] = []
     for item in json.loads(val):
         ts = item.get("Timestamp")
-        when = datetime.fromisoformat(str(ts).replace("Z", "+00:00")) if ts else _EPOCH
+        when = parse_rfc3339(str(ts)) if ts else _EPOCH
         out.append(TableExportInfo(table=item.get("Table", ""), timestamp=when))
     return out
 
@@ -254,7 +269,7 @@ def bulk_download_data(
 
     if not downloads:
         logger.debug("no files to download")
-        return tables
+        return []  # PARITY: Go discards the accumulated no-URL entries when there are zero files (import.go:288-291)
 
     total = len(downloads)
     total_bytes = 0

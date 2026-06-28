@@ -150,6 +150,30 @@ def test_bulk_download_data_no_urls_uses_cursor(tmp_path) -> None:
     assert by_table["orders"].timestamp.year == 2026
 
 
+class _FakeTracker:
+    def __init__(self, payload: str) -> None:
+        self._payload = payload
+
+    def get_key(self, key):
+        return (True, self._payload)
+
+
+def test_table_export_info_trimmed_fraction_round_trip() -> None:
+    # Go RFC3339Nano trims trailing zeros (".5", ".12345"); the reader must accept those on Python 3.10.
+    for micros, frac in [(500000, ".5"), (120000, ".12"), (123450, ".12345"), (0, "")]:
+        ts = datetime(2026, 1, 1, 0, 0, 0, micros, tzinfo=timezone.utc)
+        payload = marshal_table_export_info([TableExportInfo(table="t", timestamp=ts)])
+        assert json.loads(payload)[0]["Timestamp"] == f"2026-01-01T00:00:00{frac}Z"
+        loaded = load_table_export_info(_FakeTracker(payload))
+        assert loaded[0].timestamp == ts  # round-trips despite the trimmed fraction
+
+
+def test_bulk_download_data_all_empty_discards(tmp_path) -> None:
+    # PARITY: when no table has files to download, Go discards the no-URL cursor entries (returns nil)
+    data = {"empty": ExportJobTableData(status="Completed", cursor="1700000000000000000")}
+    assert bulk_download_data(LOG, data, str(tmp_path), get=lambda url: _Resp(200, b"x")) == []
+
+
 def test_table_export_info_round_trip() -> None:
     infos = [TableExportInfo(table="user", timestamp=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc))]
     payload = marshal_table_export_info(infos)
