@@ -141,7 +141,9 @@ class FileDriver:
         self._logger = config.logger.with_prefix("[file]")
         self.get_path_from_url(config.url)
         self._import_config = config
-        raise NotImplementedError("import run loop (importer.Run) lands at M5")
+        from eds.importer import run as importer_run
+
+        importer_run(self._logger, config, self)
 
     def supports_delete(self) -> bool:
         return False

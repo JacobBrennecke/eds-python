@@ -260,8 +260,9 @@ class SnowflakeDriver:
         return []
 
     def run_import(self, config: ImporterConfig) -> None:
-        # PARITY: snowflake.go Import (stage + PUT + COPY) — lands with to_file_uri (File driver / M5).
-        raise NotImplementedError("snowflake import lands with the File driver (to_file_uri)")
+        # PARITY: snowflake.go Import is a BULK load (CREATE STAGE + PUT + COPY INTO), not the per-event
+        # importer.Run path the other drivers use — and it's unit-untestable (no Snowflake account). Deferred.
+        raise NotImplementedError("snowflake bulk import (stage/PUT/COPY) is unit-untestable; follows")
 
 
 # Re-export for type hints elsewhere.

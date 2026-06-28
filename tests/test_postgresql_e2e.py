@@ -25,7 +25,7 @@ def _docker_up() -> bool:
 pytestmark = pytest.mark.skipif(not _docker_up(), reason="Docker not available")
 
 from eds.dbchange import DBChangeEvent  # noqa: E402
-from eds.driver import DriverConfig  # noqa: E402
+from eds.driver import DriverConfig, ImporterConfig  # noqa: E402
 from eds.drivers.postgresql.driver import PostgresqlDriver  # noqa: E402
 from eds.drivers.postgresql.sql import get_connection_string_from_url  # noqa: E402
 from eds.schema import Schema, SchemaProperty  # noqa: E402
@@ -106,3 +106,43 @@ def test_streams_insert_update_delete_into_postgres() -> None:
             assert rows == [("u1", "Alice2", 30)]
         finally:
             driver.stop()
+
+
+def _customer_schema() -> Schema:
+    return Schema(
+        table="customer", model_version="v1", primary_keys=["id"],
+        properties={
+            "id": SchemaProperty(type="string"), "companyId": SchemaProperty(type="string"),
+            "name": SchemaProperty(type="string"),
+        },
+    )
+
+
+def test_imports_gzipped_ndjson_into_postgres(tmp_path) -> None:
+    # Exercises the SQL import path: run_import -> importer.run -> create_datasource / import_event
+    # (byte-batched) / import_completed, against a real PostgreSQL.
+    import gzip
+
+    from testcontainers.postgres import PostgresContainer
+
+    indir = tmp_path / "in"
+    indir.mkdir()
+    gzname = "202407242003015854988560000000000-abc-def-customer-2.ndjson.gz"
+    with gzip.open(indir / gzname, "wt", encoding="utf-8") as f:
+        f.write('{"id":"c1","companyId":"comp1"}\n{"id":"c2"}\n')
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        url = (
+            f"postgres://{pg.username}:{pg.password}@"
+            f"{pg.get_container_host_ip()}:{pg.get_exposed_port(5432)}/{pg.dbname}"
+        )
+        driver = PostgresqlDriver()
+        driver.run_import(ImporterConfig(
+            url=url, logger=_QuietLogger(), schema_registry=_FakeRegistry(_customer_schema()),
+            data_dir=str(indir), tables=["customer"],
+        ))
+        import psycopg
+
+        with psycopg.connect(get_connection_string_from_url(url)) as conn:
+            rows = conn.execute('SELECT "id","companyId" FROM "customer" ORDER BY "id"').fetchall()
+        assert rows == [("c1", "comp1"), ("c2", None)]

@@ -297,5 +297,20 @@ class SqlDriverBase:
         return url_from_database_configuration(self.validate_scheme(), self.default_port(), values)
 
     def run_import(self, config: ImporterConfig) -> None:
-        # PARITY: Import — connects, builds the executor, and runs importer.Run (the replay loop lands at M5).
-        raise NotImplementedError("import run loop lands at M5")
+        """PARITY: Import — connect a fresh db, build the byte-batched executor, replay via importer.Run, close."""
+        assert config.logger is not None
+        self._logger = config.logger.with_prefix(self.log_prefix())
+        self._registry = config.schema_registry
+        self._db = self._connect_to_db(config.context, config.url)
+        self._import_config = config
+        self._executor = self._db.create_import_executor(config.dry_run)
+        self._pending = []
+        self._count = 0
+        self._size = 0
+        from eds.importer import run as importer_run
+
+        try:
+            importer_run(self._logger, config, self)
+        finally:
+            self._db.close()
+            self._db = None

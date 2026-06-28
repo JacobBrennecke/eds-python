@@ -163,7 +163,14 @@ class SchemaRegistry(Protocol):
     def close(self) -> None: ...
 
 
+class SchemaValidationError(Exception):
+    """PARITY: util.ErrSchemaValidation — raised by SchemaValidator.validate on a JSON-schema mismatch (Go:
+    errors.Join(ErrSchemaValidation, *js.ValidationError)). The importer treats this as a skip; any OTHER
+    exception is an internal validator error that aborts the run."""
+
+
 class SchemaValidator(Protocol):
-    """PARITY: schema.go SchemaValidator — (found, valid, transformed-path); raises on error."""
+    """PARITY: schema.go SchemaValidator — (found, valid, transformed-path); raises SchemaValidationError on
+    a mismatch (skip) or another exception on an internal error (abort)."""
 
     def validate(self, event: DBChangeEvent) -> tuple[bool, bool, str]: ...
