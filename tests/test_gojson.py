@@ -6,7 +6,24 @@ from __future__ import annotations
 import pytest
 
 from eds.util.gofloat import format_f
-from eds.util.gojson import RawJson, marshal, stringify
+from eds.util.gojson import RawJson, compact_raw, marshal, stringify
+
+
+def test_compact_raw_matches_go_marshal_of_rawmessage() -> None:
+    # Go json.Marshal of a RawMessage: drop insignificant whitespace, HTML-escape < > & and U+2028/U+2029,
+    # but preserve number formatting + key order.
+    assert compact_raw('{"b": 1.50, "a": "x&y<z>"}') == '{"b":1.50,"a":"x\\u0026y\\u003cz\\u003e"}'
+    # LS/PS built via chr() so this test file contains no invisible characters.
+    ls, ps = chr(0x2028), chr(0x2029)
+    assert compact_raw('{"u":"a' + ls + 'b' + ps + 'c"}') == '{"u":"a\\u2028b\\u2029c"}'
+    # idempotent on already-compact + escaped input (the streaming "after" path)
+    already = '{"a":"x\\u0026y","n":1.5}'
+    assert compact_raw(already) == already
+
+
+def test_rawjson_is_compacted_and_escaped_on_marshal() -> None:
+    # A RawJson marshaled via stringify is compacted + HTML-escaped (NOT emitted verbatim).
+    assert stringify(RawJson('{"k": "a&b"}')) == '{"k":"a\\u0026b"}'
 
 
 def test_string_escaping_matches_go() -> None:

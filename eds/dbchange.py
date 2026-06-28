@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from eds.util.gojson import RawJson, marshal
+from eds.util.gojson import RawJson, compact_raw, marshal
 
 
 @dataclass
 class DBChangeEvent:
     """PARITY: dbchange.go DBChangeEvent. JSON (struct) serialization is declaration-order + omitempty
-    via __gojson__ — NOT sorted like a map. before/after are raw (json.RawMessage) and re-emitted verbatim."""
+    via __gojson__ — NOT sorted like a map. before/after (json.RawMessage) are compacted + HTML-escaped on
+    emit (compact_raw), exactly as Go's json.Marshal renders a RawMessage field."""
 
     operation: str = ""
     id: str = ""
@@ -95,10 +96,11 @@ class DBChangeEvent:
             parts.append('"locationId":' + marshal(self.location_id))
         if self.user_id is not None:
             parts.append('"userId":' + marshal(self.user_id))
+        # PARITY: json.Marshal compacts + HTML-escapes a RawMessage field (it is NOT emitted verbatim).
         if self.before is not None and len(self.before.value) > 0:
-            parts.append('"before":' + self.before.value)
+            parts.append('"before":' + compact_raw(self.before.value))
         if self.after is not None and len(self.after.value) > 0:
-            parts.append('"after":' + self.after.value)
+            parts.append('"after":' + compact_raw(self.after.value))
         if self.diff:  # omitempty: nil/empty slice omitted
             parts.append('"diff":' + marshal(self.diff))
         parts.append('"timestamp":' + marshal(self.timestamp))

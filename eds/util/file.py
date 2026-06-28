@@ -31,14 +31,17 @@ def is_localhost(url: str) -> bool:
 def list_dir(directory: str) -> list[str]:
     """PARITY: util.ListDir — recurse, skip ``.DS_Store``, return file paths.
 
-    Go's os.ReadDir yields entries sorted by name; sorted() reproduces that order."""
+    Go's os.ReadDir yields entries sorted by name; sorted() reproduces that order. DirEntry.IsDir() reflects
+    the entry type WITHOUT following symlinks, so a symlink-to-directory is treated as a (file) entry — hence
+    is_dir(follow_symlinks=False)."""
     res: list[str] = []
-    for name in sorted(os.listdir(directory)):
-        full = os.path.join(directory, name)
-        if os.path.isdir(full):
-            res.extend(list_dir(full))
-        elif name != ".DS_Store":
-            res.append(full)
+    with os.scandir(directory) as it:
+        entries = sorted(it, key=lambda e: e.name)
+    for entry in entries:
+        if entry.is_dir(follow_symlinks=False):
+            res.extend(list_dir(entry.path))
+        elif entry.name != ".DS_Store":
+            res.append(entry.path)
     return res
 
 

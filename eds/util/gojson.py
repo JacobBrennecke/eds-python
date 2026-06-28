@@ -14,7 +14,8 @@ from eds.util.gofloat import format_json
 
 
 class RawJson:
-    """PARITY: encoding/json.RawMessage — a pre-encoded JSON fragment emitted verbatim."""
+    """PARITY: encoding/json.RawMessage — a pre-encoded JSON fragment. On marshal it is compacted +
+    HTML-escaped (compact_raw), exactly as Go's json.Marshal renders a RawMessage field."""
 
     __slots__ = ("value",)
 
@@ -23,6 +24,49 @@ class RawJson:
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"RawJson({self.value!r})"
+
+
+def compact_raw(s: str) -> str:
+    """PARITY: encoding/json appendCompact(escapeHTML=true) — how json.Marshal renders a RawMessage field:
+    drop insignificant whitespace (outside strings) and HTML-escape ``< > &`` and U+2028/U+2029 to ``\\uXXXX``.
+    A byte-level transform — number formatting and key order are preserved (NOT a re-marshal, which would sort
+    keys and reformat numbers)."""
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for c in s:
+        if in_string:
+            if escaped:
+                out.append(c)
+                escaped = False
+                continue
+            if c == "\\":
+                out.append(c)
+                escaped = True
+                continue
+            if c == '"':
+                out.append(c)
+                in_string = False
+                continue
+        elif c in " \t\n\r":  # insignificant whitespace outside a string
+            continue
+        elif c == '"':
+            out.append(c)
+            in_string = True
+            continue
+        if c == "<":
+            out.append("\\u003c")
+        elif c == ">":
+            out.append("\\u003e")
+        elif c == "&":
+            out.append("\\u0026")
+        elif c == " ":
+            out.append("\\u2028")
+        elif c == " ":
+            out.append("\\u2029")
+        else:
+            out.append(c)
+    return "".join(out)
 
 
 def stringify(val: object) -> str:
@@ -40,8 +84,8 @@ def marshal(val: object, *, sort_keys: bool = True) -> str:
     (non-finite float), so callers needing the error (the driver path) can surface it.
 
     ``sort_keys`` defaults to True (Go marshals maps with sorted keys). Pass False to preserve dict
-    insertion order — used to reconstruct ``json.RawMessage`` fields (before/after) verbatim, since Go
-    keeps those raw rather than re-marshaling them."""
+    insertion order — used when reconstructing ``json.RawMessage`` fields (before/after). NOTE: Go's
+    json.Marshal does NOT emit a RawMessage verbatim — it compacts + HTML-escapes it (see compact_raw)."""
     out: list[str] = []
     _encode(val, out, sort_keys)
     return "".join(out)
@@ -51,7 +95,7 @@ def _encode(v: object, out: list[str], sort_keys: bool = True) -> None:
     if v is None:
         out.append("null")
     elif isinstance(v, RawJson):
-        out.append(v.value)
+        out.append(compact_raw(v.value))  # PARITY: json.Marshal compacts + HTML-escapes a RawMessage field
     elif hasattr(v, "__gojson__"):
         # Struct-like values (e.g. DBChangeEvent) serialize in Go field-declaration order with omitempty.
         out.append(v.__gojson__())

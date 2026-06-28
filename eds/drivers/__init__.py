@@ -18,13 +18,15 @@ def register_all() -> None:
     from eds.drivers.snowflake.snowflake_keypair import SnowflakeKeyPairDriver
     from eds.drivers.sqlserver.driver import MssqlDriver
 
-    for protocol, driver in (
-        ("postgres", PostgresqlDriver()),
-        ("mysql", MysqlDriver()),
-        ("sqlserver", MssqlDriver()),
-        ("snowflake", SnowflakeDriver()),
-        ("snowflake-keypair", SnowflakeKeyPairDriver()),
-        ("file", FileDriver()),
+    for protocol, cls in (
+        ("postgres", PostgresqlDriver),
+        ("mysql", MysqlDriver),
+        ("sqlserver", MssqlDriver),
+        ("snowflake", SnowflakeDriver),
+        ("snowflake-keypair", SnowflakeKeyPairDriver),
+        ("file", FileDriver),
     ):
-        register_driver(protocol, driver)
-        register_importer(protocol, driver)
+        # PARITY: Go registers a SEPARATE instance in each registry (driver vs importer), so streaming and
+        # import don't share mutable state on one object.
+        register_driver(protocol, cls())
+        register_importer(protocol, cls())

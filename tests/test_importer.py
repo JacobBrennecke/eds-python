@@ -138,3 +138,21 @@ def test_file_driver_import_e2e(tmp_path) -> None:
         '{"operation":"INSERT","id":"' + eid + '","table":"customer","key":["c2"],"modelVersion":"v1",'
         '"after":{"id":"c2"},"timestamp":1721851381585,"mvccTimestamp":"1721851381585498856","imported":true}'
     )
+
+
+def test_file_driver_import_html_escapes_after(tmp_path) -> None:
+    # The imported `after` is compacted + HTML-escaped on write, like Go's json.Marshal of a RawMessage.
+    indir = tmp_path / "in"
+    indir.mkdir()
+    outdir = tmp_path / "out"
+    outdir.mkdir()
+    with gzip.open(indir / _GZ, "wt", encoding="utf-8") as f:
+        f.write('{"id":"c1", "name":"AT&T"}\n')  # note the whitespace + the literal &
+    reg = _FakeRegistry({"customer": _customer_schema()})
+    FileDriver().run_import(ImporterConfig(
+        url="file://" + str(outdir).replace("\\", "/"), logger=_QuietLogger(),
+        schema_registry=reg, data_dir=str(indir), tables=["customer"],
+    ))
+    content = (outdir / "customer" / "1721851381-c1.json").read_text(encoding="utf-8")
+    assert '"after":{"id":"c1","name":"AT\\u0026T"}' in content  # & escaped, whitespace dropped
+    assert "AT&T" not in content
