@@ -3,11 +3,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Packaging / build output (setuptools editable install; PyInstaller one-file build at M9)
+# Packaging / build output (setuptools editable install; PyInstaller one-file build at M10)
 build/
 dist/
 *.egg-info/
 .eggs/
+eds/_version.py
 
 # Virtual environment / local env
 .venv/

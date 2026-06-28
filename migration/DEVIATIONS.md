@@ -36,8 +36,35 @@ Go embedded server is only used by dev/e2e tooling, not the production consumer 
 ### single-binary-pyinstaller
 **Go:** `go build` → one static `eds` binary. **Python:** PyInstaller (one-file) → one `eds`
 executable bundling the interpreter + deps, matching Go's single-binary distribution (the C# port
-used single-file self-contained publish for the same reason). Native deps (librdkafka, ODBC) bundle
-where supported; documented at M9.
+used single-file self-contained publish for the same reason). **M10 realization** (`eds.spec` +
+`packaging/build.py`): `collect_submodules("eds")` bundles the dynamically-registered drivers;
+`collect_data_files("jsonschema_specifications")` ships the draft meta-schemas (else the schema
+validator's `check_schema` can't find draft-07); `shopmonkey.asc` ships via `datas` (read with
+`importlib.resources`); the lazily-imported DB/runtime libs are listed as hidden imports. Version is
+baked into a gitignored `eds/_version.py` at build time (`root._resolve_version`: `$GIT_SHA` →
+`eds._version` → `"dev"`); the artifact is renamed `eds_<Platform>_<arch>[.exe]` to match
+`build_release_urls` / the `download` command. The frozen exe re-execs itself for the fork/download/
+enroll subcommands (`process._self_invocation` → `[sys.executable]` when `sys.frozen`). **Gaps:**
+`snowflake-connector-python` is not a hard dep, so the snowflake driver bundles only when that lib is
+installed in the build env (it is optional + lazily imported); `pymssql`/`psycopg` native deps bundle
+via the contrib hooks where present, and `nats-py[nkeys]` (→ `nkeys` + `pynacl`) is a hard dep + an
+explicit hidden import so the production NATS credential-signing path works in the frozen binary
+(nats-py imports `nkeys` lazily and has no PyInstaller hook). The self-upgrade `apply()` works
+mechanically on the packaged binary, but the end-to-end self-upgrade closure stays gated because the
+published GitHub release artifacts are **Go** binaries — no Python release artifacts exist (see
+`upgrade-apply-only-for-frozen-binary`).
+
+**Accepted one-file tradeoffs:** a one-file build re-extracts (~18 MB) to a fresh `%TEMP%/_MEIxxxxxx`
+on *every* process launch, and the runner is a self-re-exec supervisor (Layer-1 wrapper → Layer-2
+control plane → per-session consumer forks, plus re-forks on 24h credential renewal / restart /
+error backoff). So vs the Go native binary there is (1) a multi-second extract cost per re-exec and
+(2) a temp-dir leak when the supervisor *hard-kills* a child (Windows `TerminateProcess` bypasses the
+bootloader's atexit cleanup, orphaning that child's `_MEI` dir). A fixed `runtime_tmpdir` does NOT
+fix either; the real mitigation for high-restart Windows deployments is a one-DIR build (`COLLECT`
+instead of one-file `EXE`) — kept one-file here to match Go's single-binary distribution, documented
+as the tradeoff. **Snowflake:** `register_all` registers the snowflake driver unconditionally, so
+without `snowflake-connector-python` bundled a `snowflake://` URL fails at connect with a bare
+`ModuleNotFoundError` rather than a clean "driver unavailable" (accepted — the lib is optional/lazy).
 
 ## M1–M2 utility/infra deviations
 
