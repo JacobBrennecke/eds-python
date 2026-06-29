@@ -123,7 +123,8 @@ async def _run_fork_async(args: argparse.Namespace) -> int:  # noqa: C901 — fa
         registry = new_api_registry(logger, args.api_url, _root.VERSION, tracker)
         table_timestamps = _load_table_export_info(tracker)
         # PARITY: the driver gets a NON-cancellable context so it can flush during shutdown (fork.go:118).
-        driver = new_driver(None, logger, args.url, registry, tracker, data_dir)
+        # FEATURE(audit-mode): args.mode is the resolved IngestMode (forwarded by the server, or the fork default).
+        driver = new_driver(None, logger, args.url, registry, tracker, data_dir, ingest_mode=args.mode)
     except Exception as e:  # noqa: BLE001
         logger.error("error during setup: %s", e)
         tracker.close()

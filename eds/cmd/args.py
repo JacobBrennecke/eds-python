@@ -27,6 +27,9 @@ SERVER_IGNORE_FLAGS = frozenset(
         "--server",
         "--keep-logs",
         "--no-restart",
+        # FEATURE(audit-mode): the server resolves --mode (flag/config/default) and forwards the RESOLVED value
+        # to the fork EXPLICITLY, so drop any user-supplied --mode here to avoid duplicating it on the fork args.
+        "--mode",
     }
 )
 

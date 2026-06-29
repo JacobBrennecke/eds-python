@@ -22,6 +22,7 @@ from eds.driver import (
     DriverStoppedError,
     FieldError,
     ImporterConfig,
+    IngestMode,
     new_database_configuration,
     url_from_database_configuration,
 )
@@ -102,6 +103,18 @@ def plan_flush(
     return FlushPlan(query, statement_count, cache_keys, delete_keys)
 
 
+def plan_flush_append(records: list[Record], registry: SchemaRegistry, logger: Logger) -> FlushPlan:
+    """FEATURE(audit-mode): plan an append flush — one INSERT … SELECT per record (statement_count ==
+    len(records)). NO combine/dedup, NO update-noise skip, NO 24h tracker (full history is the point), so
+    cache_keys/delete_keys are empty. See migration/features/audit-mode.md §3.4."""
+    query = ""
+    for record in records:
+        _, version = registry.get_table_version(record.table)  # PARITY: Go ignores the found bool
+        schema = registry.get_schema(record.table, version)
+        query += sql.to_append_sql(record, schema)
+    return FlushPlan(query, len(records), [], [])
+
+
 class SnowflakeDriver:
     """PARITY: snowflakeDriver."""
 
@@ -121,6 +134,7 @@ class SnowflakeDriver:
         self._lock = threading.Lock()
         self._prof_last = 0.0
         self._prof_records = 0
+        self._mode: IngestMode = IngestMode.UPSERT  # FEATURE(audit-mode): captured in start(); append branch below
 
     # ---- hooks / metadata ----
     def log_prefix(self) -> str:
@@ -157,6 +171,7 @@ class SnowflakeDriver:
         self._ctx = config.context
         self._registry = config.schema_registry
         self._tracker = config.tracker
+        self._mode = config.ingest_mode  # FEATURE(audit-mode): resolved upsert/append mode
         self._db = self._connect_to_db(config.context, config.url)
 
     def _connect_to_db(self, ctx: Any, url: str) -> ISnowflakeDb:
@@ -217,9 +232,12 @@ class SnowflakeDriver:
                 return
             self._sequence += 1
             records = sort_records_by_mvcc_timestamp(records)
-            records = combine_records_with_same_primary_key(records)
             tag = f"eds-{self._session_id}/{self._sequence}/{count}"
-            plan = plan_flush(records, self._registry, lambda k: self._tracker.get_key(k)[0], logger)
+            if self._mode == IngestMode.APPEND:  # FEATURE(audit-mode): full history, no dedup/tracker
+                plan = plan_flush_append(records, self._registry, logger)
+            else:
+                records = combine_records_with_same_primary_key(records)
+                plan = plan_flush(records, self._registry, lambda k: self._tracker.get_key(k)[0], logger)
             if plan.statement_count > 0:
                 rows = self._db.exec_multi_statement(plan.query, plan.statement_count)
                 if rows != plan.statement_count:
@@ -233,6 +251,21 @@ class SnowflakeDriver:
     def migrate_new_table(self, ctx: Any, logger: Logger, schema: Schema) -> None:
         assert self._db is not None
         with self._lock:
+            if self._mode == IngestMode.APPEND:  # FEATURE(audit-mode): history table (CREATE OR REPLACE) + 2 views
+                if schema.table in self._dbschema:
+                    logger.info("table already exists for: %s, dropping and recreating...", schema.table)
+                    if self._tracker is not None:
+                        del_count = self._tracker.delete_keys_with_prefix("snowflake:" + schema.table + ":")
+                        logger.debug("deleted %d cache keys for table %s", del_count, schema.table)
+                for stmt in (
+                    sql.create_append_sql(schema),
+                    sql.create_current_view_sql(schema),
+                    sql.create_timeline_view_sql(schema),
+                ):
+                    logger.trace("migrate new table (append): %s", stmt)
+                    self._db.exec(stmt)
+                self._refresh_schema(self._db, fail_if_empty=True)
+                return
             if schema.table in self._dbschema:
                 logger.info("table already exists for: %s, dropping and recreating...", schema.table)
                 self._db.exec("DROP TABLE IF EXISTS " + sql.quote_identifier(schema.table))
@@ -251,6 +284,10 @@ class SnowflakeDriver:
                 logger.trace("migrating new columns: %s", stmt)
                 self._db.exec(stmt)
                 logger.debug("migrated new columns: %s", stmt)
+            if self._mode == IngestMode.APPEND:  # FEATURE(audit-mode): rebuild views (new column shifts output)
+                for stmt in (sql.create_current_view_sql(schema), sql.create_timeline_view_sql(schema)):
+                    logger.trace("recreating view after add-column (append): %s", stmt)
+                    self._db.exec(stmt)
             self._refresh_schema(self._db, fail_if_empty=True)
 
     def get_destination_schema(self, ctx: Any, logger: Logger) -> DatabaseSchema:
@@ -266,4 +303,4 @@ class SnowflakeDriver:
 
 
 # Re-export for type hints elsewhere.
-__all__ = ["FlushPlan", "ISnowflakeDb", "SnowflakeDriver", "plan_flush", "SchemaMap"]
+__all__ = ["FlushPlan", "ISnowflakeDb", "SnowflakeDriver", "plan_flush", "plan_flush_append", "SchemaMap"]

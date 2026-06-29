@@ -163,6 +163,145 @@ def create_sql(s: Schema) -> str:
     return f"DROP TABLE IF EXISTS {table};\nCREATE TABLE {table} (\n{body}\n);\n"
 
 
+# ===================================================================================================
+# FEATURE(audit-mode): append / audit-trail SQL — NOT a Go port. See migration/features/audit-mode.md §3.1.
+# Strictly additive: the upsert builders above are untouched; these emit plain INSERTs + history DDL + views.
+# ===================================================================================================
+
+# FEATURE(audit-mode): the fixed audit column names (shared literal names across all four drivers, §1.2).
+_EDS_SEQ = "_eds_seq"
+_EDS_OPERATION = "_eds_operation"
+_EDS_MVCC = "_eds_mvcc_timestamp"
+_EDS_TIMESTAMP = "_eds_timestamp"
+_EDS_APPENDED_AT = "_eds_appended_at"
+
+
+def to_append_sql(c: DBChangeEvent, model: Schema) -> str:
+    """FEATURE(audit-mode): one plain INSERT per change (NO ON CONFLICT). INSERT/UPDATE emit the full
+    after-snapshot; DELETE emits a tombstone (PK value(s) + NULLs). Reuses the upsert insert-value formatting
+    (quote_value + to_json_string_val) so each row is a byte-sibling of the upsert SQL. mvcc is a BARE numeric
+    literal (empty → NULL); _eds_seq + _eds_appended_at are DB-generated (never in the column list)."""
+    columns = model.columns()
+    vals: list[str] = []
+    if c.operation == "DELETE":
+        keys = c.key or []
+        for name in columns:
+            if name in model.primary_keys:
+                vals.append(quote_value(keys[model.primary_keys.index(name)]))
+            else:
+                vals.append("NULL")
+    else:
+        o: dict[str, object] = {}
+        if c.after is not None and len(c.after.value) > 0:
+            # PARITY (reused): re-parse the raw After (numbers → float), exactly like upsert to_sql.
+            parsed = json.loads(c.after.value, parse_int=float)
+            if isinstance(parsed, dict):
+                o = parsed
+        for name in columns:
+            prop = model.properties.get(name, SchemaProperty())
+            if name in o:
+                vals.append(to_json_string_val(name, quote_value(o[name]), prop, True))
+            else:
+                vals.append("NULL")  # FEATURE(audit-mode): append cols are nullable → NULL passes through
+    vals.append(quote_value(c.operation))  # 'INSERT' / 'UPDATE' / 'DELETE'
+    # FEATURE(audit-mode): bare numeric literal (NOT quoted); falsy ("" or JSON-null None) → NULL
+    vals.append(c.mvcc_timestamp if c.mvcc_timestamp else "NULL")
+    vals.append(str(c.timestamp))
+    cols = ",".join(
+        [quote_identifier(name) for name in columns]
+        + [quote_identifier(_EDS_OPERATION), quote_identifier(_EDS_MVCC), quote_identifier(_EDS_TIMESTAMP)]
+    )
+    return f"INSERT INTO {quote_identifier(c.table)} ({cols}) VALUES ({','.join(vals)});\n"
+
+
+def create_append_sql(s: Schema) -> str:
+    """FEATURE(audit-mode): the append/history base table + history index (§3.1a). Object columns keep their
+    upsert types but are NULLABLE except the PK(s); a surrogate _eds_seq IDENTITY PK replaces the object-id PK;
+    the audit columns are appended. DROP TABLE … CASCADE auto-drops dependent views on recreate."""
+    table = quote_identifier(s.table)
+    lines = []
+    for name in s.columns():
+        prop = s.properties.get(name, SchemaProperty())
+        not_null = " NOT NULL" if name in s.primary_keys else ""  # FEATURE: only PK(s) NOT NULL in append
+        lines.append("\t" + quote_identifier(name) + " " + prop_type_to_sql_type(prop) + not_null + ",\n")
+    body = "".join(lines)
+    body += "\t" + quote_identifier(_EDS_SEQ) + " BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n"
+    body += "\t" + quote_identifier(_EDS_OPERATION) + " TEXT NOT NULL,\n"
+    body += "\t" + quote_identifier(_EDS_MVCC) + " NUMERIC(38,10),\n"
+    body += "\t" + quote_identifier(_EDS_TIMESTAMP) + " BIGINT NOT NULL,\n"
+    body += "\t" + quote_identifier(_EDS_APPENDED_AT) + " TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()"
+    # FEATURE(audit-mode): PK idents join with no-space "," (cross-port w/ C#); ", " precedes the DESC suffix.
+    idx_cols = (
+        ",".join(quote_identifier(pk) for pk in s.primary_keys)
+        + ", " + ", ".join([quote_identifier(_EDS_MVCC) + " DESC", quote_identifier(_EDS_TIMESTAMP) + " DESC",
+                            quote_identifier(_EDS_SEQ) + " DESC"])
+    )
+    idx = quote_identifier(s.table + "__eds_history_idx")
+    return (
+        f"DROP TABLE IF EXISTS {table} CASCADE;\n"
+        f"CREATE TABLE {table} (\n{body}\n);\n"
+        f"CREATE INDEX {idx} ON {table} ({idx_cols});\n"
+    )
+
+
+def create_current_view_sql(s: Schema) -> str:
+    """FEATURE(audit-mode): the latest-per-object view <table>_current (§3.1c) — DISTINCT ON the PK(s), ordered
+    mvcc DESC NULLS LAST, projecting ONLY the object columns and EXCLUDING rows whose latest change is a DELETE
+    (so it is row-for-row equal to the legacy upsert table)."""
+    obj_csv = ",".join(quote_identifier(c) for c in s.columns())
+    distinct = ",".join(quote_identifier(pk) for pk in s.primary_keys)
+    # FEATURE(audit-mode): PK idents join with no-space "," (== DISTINCT ON + C#); ", " precedes the DESC suffix.
+    order_by = (
+        ",".join(quote_identifier(pk) for pk in s.primary_keys)
+        + ", " + ", ".join([quote_identifier(_EDS_MVCC) + " DESC NULLS LAST",
+                            quote_identifier(_EDS_TIMESTAMP) + " DESC", quote_identifier(_EDS_SEQ) + " DESC"])
+    )
+    return (
+        f"CREATE OR REPLACE VIEW {quote_identifier(s.table + '_current')} AS\n"
+        f"SELECT {obj_csv}\n"
+        f"FROM (\n"
+        f"\tSELECT DISTINCT ON ({distinct})\n"
+        f"\t\t{obj_csv},{quote_identifier(_EDS_OPERATION)}\n"
+        f"\tFROM {quote_identifier(s.table)}\n"
+        f"\tORDER BY {order_by}\n"
+        f') "latest"\n'
+        f"WHERE {quote_identifier(_EDS_OPERATION)} <> 'DELETE';\n"
+    )
+
+
+def create_timeline_view_sql(s: Schema) -> str:
+    """FEATURE(audit-mode): the SCD-Type-2 point-in-time view <table>_timeline (§3.1d) — every change row
+    (INCLUDING deletes), plus valid_from = mvcc and valid_to = LEAD(mvcc) over the PK partition (NULL = still
+    valid). Point-in-time: WHERE pk = X AND T >= valid_from AND (valid_to IS NULL OR T < valid_to)."""
+    obj_csv = ",".join(quote_identifier(c) for c in s.columns())
+    partition = ",".join(quote_identifier(pk) for pk in s.primary_keys)
+    order_by = ", ".join(
+        [quote_identifier(_EDS_MVCC) + " ASC", quote_identifier(_EDS_TIMESTAMP) + " ASC",
+         quote_identifier(_EDS_SEQ) + " ASC"]
+    )
+    return (
+        f"CREATE OR REPLACE VIEW {quote_identifier(s.table + '_timeline')} AS\n"
+        f"SELECT\n"
+        f"\t{obj_csv},\n"
+        f"\t{quote_identifier(_EDS_OPERATION)},\n"
+        f'\t{quote_identifier(_EDS_MVCC)} AS {quote_identifier("valid_from")},\n'
+        f"\tLEAD({quote_identifier(_EDS_MVCC)}) OVER (\n"
+        f"\t\tPARTITION BY {partition}\n"
+        f"\t\tORDER BY {order_by}\n"
+        f'\t) AS {quote_identifier("valid_to")}\n'
+        f"FROM {quote_identifier(s.table)};\n"
+    )
+
+
+def drop_views_sql(s: Schema) -> list[str]:
+    """FEATURE(audit-mode): drop both views (timeline then current) — used by the add-column migration before
+    recreating them (a new sorted-position column shifts the view output columns, so they must be rebuilt)."""
+    return [
+        f"DROP VIEW IF EXISTS {quote_identifier(s.table + '_timeline')};",
+        f"DROP VIEW IF EXISTS {quote_identifier(s.table + '_current')};",
+    ]
+
+
 def get_connection_string_from_url(urlstr: str) -> str:
     """PARITY: GetConnectionStringFromURL — force scheme postgresql, default port 5432, inject
     application_name=eds and (for localhost) sslmode=disable. The query is re-encoded (sorted) ONLY when a

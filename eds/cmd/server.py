@@ -18,7 +18,7 @@ import threading
 import time
 
 from eds.cmd.args import collect_command_args
-from eds.cmd.config import Config, init_config, load_config
+from eds.cmd.config import Config, init_config, load_config, set_config_value
 from eds.cmd.exit_codes import (
     EXIT_ERROR,
     EXIT_INCORRECT_USAGE,
@@ -40,12 +40,32 @@ from eds.cmd.session import (
     send_start,
     write_creds_to_file,
 )
+from eds.driver import IngestMode, parse_ingest_mode  # FEATURE(audit-mode)
 from eds.notification.dtos import SendLogsResponse
 from eds.util.api import get_api_url_from_jwt
 from eds.util.file import get_free_port
 from eds.util.logger import Logger
 from eds.util.process import ForkArgs, _self_invocation, fork
 from eds.util.shutdown import ShutdownSignal
+
+
+def resolve_ingest_mode(explicit: IngestMode | None, config: Config, data_dir: str) -> IngestMode:
+    """FEATURE(audit-mode): resolve + persist the ingest mode per audit-mode.md §1.1 (Layer-2 control plane).
+
+    Precedence: explicit --mode (this run) > config.toml "mode" key > built-in default "upsert". Persistence:
+    1. explicit --mode X       → use X AND persist (set_config_value(data_dir, "mode", X)).
+    2. no --mode, config "mode" → use the config value; do NOT rewrite config.
+    3. no --mode, no config key → default "upsert" AND write it back (so config is self-documenting).
+    """
+    if explicit is not None:
+        mode = explicit if isinstance(explicit, IngestMode) else parse_ingest_mode(explicit)
+        set_config_value(data_dir, "mode", mode.value)
+        return mode
+    cfg_mode = config.get_string("mode")
+    if cfg_mode:
+        return parse_ingest_mode(cfg_mode)
+    set_config_value(data_dir, "mode", IngestMode.UPSERT.value)
+    return IngestMode.UPSERT
 
 
 def run_server(args: argparse.Namespace, argv: list[str]) -> int:
@@ -199,9 +219,14 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
     if args.health_port > 0:  # PARITY: server.go:531-535 — the deprecated --health-port overrides --port
         port = args.health_port
 
+    # FEATURE(audit-mode): resolve + persist the ingest mode, then forward the RESOLVED value to the fork
+    # EXPLICITLY (--mode is in SERVER_IGNORE_FLAGS so collect_command_args drops any user copy → no duplicate).
+    ingest_mode = resolve_ingest_mode(args.mode, config, data_dir)
+
     company_ids = args.company_ids or None
     base_args = collect_command_args(argv[1:])
     base_args += ["--port", str(port), "--data-dir", data_dir, "--server", nats_url, "--api-url", api_url]
+    base_args += ["--mode", ingest_mode.value]  # FEATURE(audit-mode): explicit resolved-mode forward
 
     ctx = ControlPlaneContext(
         logger=logger, port=port, api_url=api_url, api_key=api_key, version=version, keep_logs=keep_logs,

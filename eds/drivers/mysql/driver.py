@@ -38,6 +38,22 @@ class MysqlDriver(SqlDriverBase):
     def to_sql(self, event: DBChangeEvent, schema: Schema) -> str:
         return sql.to_sql(event, schema)
 
+    # ---- FEATURE(audit-mode): append-mode builders (see migration/features/audit-mode.md §3.2) ----
+    def to_append_sql(self, event: DBChangeEvent, schema: Schema) -> str:
+        return sql.to_append_sql(event, schema)
+
+    def create_append_table_sql(self, schema: Schema) -> str:
+        return sql.create_append_sql(schema)
+
+    def create_current_view_sql(self, schema: Schema) -> str:
+        return sql.create_current_view_sql(schema)
+
+    def create_timeline_view_sql(self, schema: Schema) -> str:
+        return sql.create_timeline_view_sql(schema)
+
+    def drop_views_sql(self, schema: Schema) -> list[str]:
+        return sql.drop_views_sql(schema)
+
     def to_sql_from_object(
         self, operation: str, schema: Schema, table: str, o: dict[str, object], diff: list[str] | None
     ) -> str:

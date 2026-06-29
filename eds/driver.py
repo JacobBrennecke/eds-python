@@ -34,6 +34,25 @@ class DriverFormat(str, Enum):
     PASSWORD = "password"
 
 
+# FEATURE(audit-mode): the ingest mode selector — NOT a Go port (Go has only upsert). See
+# migration/features/audit-mode.md §1.1. `str, Enum` so members are byte-identical strings (e.g. through
+# config/argv); IngestMode.UPSERT == "upsert". `upsert` is the legacy Go behavior; `append` is the audit trail.
+class IngestMode(str, Enum):
+    UPSERT = "upsert"
+    APPEND = "append"
+
+
+def parse_ingest_mode(s: str) -> IngestMode:
+    """FEATURE(audit-mode): parse a --mode / config value (lowercased); raise ValueError on unknown (the
+    caller maps that to EXIT_INCORRECT_USAGE, same as other bad flags)."""
+    v = (s or "").lower()
+    if v == "upsert":
+        return IngestMode.UPSERT
+    if v == "append":
+        return IngestMode.APPEND
+    raise ValueError(f"invalid ingest mode: {s!r} (expected 'upsert' or 'append')")
+
+
 class DriverStoppedError(Exception):
     """PARITY: driver.go ErrDriverStopped — message exactly 'driver stopped'."""
 
@@ -51,6 +70,9 @@ class DriverConfig:
     tracker: Any = None
     data_dir: str = ""
     context: Any = None  # cancellation token / None
+    # FEATURE(audit-mode): the resolved ingest mode threaded into the driver (drivers branch on this, never
+    # re-read the flag). Default UPSERT keeps every existing path byte-for-byte unchanged.
+    ingest_mode: IngestMode = IngestMode.UPSERT
 
 
 @dataclass
@@ -350,7 +372,8 @@ def _resolve_driver(scheme: str) -> Driver | None:
 
 
 def new_driver(
-    ctx: Any, logger: Logger, url_string: str, registry: SchemaRegistry, tracker: Any, data_dir: str
+    ctx: Any, logger: Logger, url_string: str, registry: SchemaRegistry, tracker: Any, data_dir: str,
+    ingest_mode: IngestMode = IngestMode.UPSERT,  # FEATURE(audit-mode): carried onto DriverConfig; default UPSERT
 ) -> Driver:
     """PARITY: NewDriver — resolve by URL scheme (+alias), and Start if the driver is a lifecycle driver."""
     scheme = _scheme(url_string)
@@ -366,6 +389,7 @@ def new_driver(
                 tracker=tracker,
                 data_dir=data_dir,
                 context=ctx,
+                ingest_mode=ingest_mode,  # FEATURE(audit-mode)
             )
         )
     return driver

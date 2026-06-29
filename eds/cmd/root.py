@@ -15,6 +15,7 @@ import sys
 
 from eds.cmd.args import get_os_int, parse_duration
 from eds.cmd.exit_codes import EXIT_INCORRECT_USAGE, EXIT_PANIC
+from eds.driver import IngestMode, parse_ingest_mode  # FEATURE(audit-mode): --mode value parser/validator
 from eds.util.file import is_dir_writable
 from eds.util.logger import ConsoleLogger, LogLevel, new_console_logger
 
@@ -112,6 +113,10 @@ def build_parser() -> _Parser:
     srv.add_argument("--port", type=int, default=get_os_int("PORT", 8080), help="the health/metrics port")
     srv.add_argument("--eds-id", default="", help="the EDS server id")
     srv.add_argument("--keep-logs", action="store_true", help="keep logs after exit")
+    # FEATURE(audit-mode): visible on `server`; default None is the "not explicitly set" sentinel so the Layer-2
+    # control plane can apply precedence (--mode > config.toml "mode" > "upsert"). Bad value → exit 3 via _Parser.
+    srv.add_argument("--mode", type=parse_ingest_mode, default=None,
+                     help="ingest mode: 'upsert' (default) or 'append' (audit trail)")
     srv.add_argument("--health-port", type=int, default=0, help=argparse.SUPPRESS)  # deprecated
     # PARITY: default None is the "--api-url not changed" sentinel → derive the api url from the JWT.
     srv.add_argument("--api-url", default=None, help=argparse.SUPPRESS)
@@ -129,6 +134,9 @@ def build_parser() -> _Parser:
     fork.add_argument("--api-url", default=_DEFAULT_API_URL, help=argparse.SUPPRESS)
     fork.add_argument("--server", dest="nats_url", default=_DEFAULT_NATS_URL, help=argparse.SUPPRESS)
     fork.add_argument("--port", type=int, default=get_os_int("PORT", 8080), help=argparse.SUPPRESS)
+    # FEATURE(audit-mode): hidden on `fork`; the server forwards the RESOLVED value here. Default UPSERT keeps a
+    # directly-invoked fork byte-identical to today. args.mode is always an IngestMode (default or parsed).
+    fork.add_argument("--mode", type=parse_ingest_mode, default=IngestMode.UPSERT, help=argparse.SUPPRESS)
     _add_consumer_tuning(fork)
 
     imp = sub.add_parser("import", parents=[base], help="import data from Shopmonkey into your system",

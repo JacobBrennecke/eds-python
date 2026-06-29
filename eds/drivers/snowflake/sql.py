@@ -184,6 +184,123 @@ def add_new_columns_sql(logger: Logger | None, columns: list[str], s: Schema, db
     return res
 
 
+# ===================================================================================================
+# FEATURE(audit-mode): append / audit-trail SQL — NOT a Go port. See migration/features/audit-mode.md §3.4.
+# Strictly additive: the MERGE builders above are untouched. Snowflake uses INSERT … SELECT (PARSE_JSON /
+# TO_VARIANT are illegal in a VALUES list) and QUALIFY for the latest-per-object view; no secondary index.
+# ===================================================================================================
+
+_EDS_SEQ = "_eds_seq"
+_EDS_OPERATION = "_eds_operation"
+_EDS_MVCC = "_eds_mvcc_timestamp"
+_EDS_TIMESTAMP = "_eds_timestamp"
+_EDS_APPENDED_AT = "_eds_appended_at"
+
+
+def to_append_sql(record: Record, model: Schema) -> str:
+    """FEATURE(audit-mode): one plain INSERT … SELECT per change (NO MERGE). INSERT/UPDATE emit the full
+    after-snapshot (object values reuse quote_value + generate_insert_function, so PARSE_JSON/TO_VARIANT match
+    the upsert); DELETE emits a tombstone (PK value(s) + NULLs). mvcc is a BARE numeric literal (empty → NULL);
+    _eds_seq + _eds_appended_at are DB-generated (never in the column list). §3.4."""
+    columns = model.columns()
+    vals: list[str] = []
+    if record.operation == "DELETE":
+        keys = (record.event.key if record.event is not None else None) or []
+        for name in columns:
+            if name in model.primary_keys:
+                # FEATURE(audit-mode): fall back to record.id when event.key is empty/short (matches C#),
+                # instead of hard-indexing (which would IndexError).
+                i = model.primary_keys.index(name)
+                key_val = keys[i] if i < len(keys) else record.id
+                vals.append(quote_value(key_val, ""))
+            else:
+                vals.append("NULL")
+    else:
+        obj = record.object or {}
+        for name in columns:
+            prop = model.properties.get(name, SchemaProperty())
+            if name in obj:
+                vals.append(quote_value(obj[name], generate_insert_function(prop)))
+            else:
+                vals.append("NULL")  # FEATURE(audit-mode): append cols are nullable → NULL passes through
+    event = record.event
+    vals.append(quote_value(record.operation, ""))
+    # FEATURE(audit-mode): bare numeric literal; falsy ("" or JSON-null None) → NULL
+    vals.append(event.mvcc_timestamp if (event is not None and event.mvcc_timestamp) else "NULL")
+    vals.append(str(event.timestamp) if event is not None else "0")
+    cols = ",".join(
+        [quote_identifier(c) for c in columns]
+        + [quote_identifier(_EDS_OPERATION), quote_identifier(_EDS_MVCC), quote_identifier(_EDS_TIMESTAMP)]
+    )
+    return f"INSERT INTO {quote_identifier(record.table)} ({cols})\nSELECT {','.join(vals)};\n"
+
+
+def create_append_sql(s: Schema) -> str:
+    """FEATURE(audit-mode): the append/history base table (§3.4a). CREATE OR REPLACE (= drop+create); object
+    cols REUSE prop_type_to_sql_type VERBATIM (object → STRING, matching the upsert table; the PARSE_JSON insert
+    value casts back into the STRING column) but NULLABLE except PK(s); _eds_seq AUTOINCREMENT is the surrogate
+    PK; no secondary index (micro-partition pruning)."""
+    table = quote_identifier(s.table)
+    lines = []
+    for name in s.columns():
+        prop = s.properties.get(name, SchemaProperty())
+        not_null = " NOT NULL" if name in s.primary_keys else ""  # FEATURE: only PK(s) NOT NULL in append
+        lines.append("\t" + quote_identifier(name) + " " + prop_type_to_sql_type(prop) + not_null + ",\n")
+    body = "".join(lines)
+    body += "\t" + quote_identifier(_EDS_SEQ) + " NUMBER AUTOINCREMENT,\n"
+    body += "\t" + quote_identifier(_EDS_OPERATION) + " STRING NOT NULL,\n"
+    body += "\t" + quote_identifier(_EDS_MVCC) + " NUMBER(38,10),\n"
+    body += "\t" + quote_identifier(_EDS_TIMESTAMP) + " NUMBER,\n"
+    body += "\t" + quote_identifier(_EDS_APPENDED_AT) + " TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),\n"
+    body += "\tPRIMARY KEY (" + quote_identifier(_EDS_SEQ) + ")"
+    return f"CREATE OR REPLACE TABLE {table} (\n{body}\n);\n"
+
+
+def create_current_view_sql(s: Schema) -> str:
+    """FEATURE(audit-mode): latest-per-object view (§3.4c) — single-level QUALIFY ROW_NUMBER() = 1 per PK
+    partition, mvcc DESC NULLS LAST, excluding rows whose latest change is a DELETE."""
+    obj_lines = ",\n".join("\t" + quote_identifier(c) for c in s.columns())
+    partition = ",".join(quote_identifier(pk) for pk in s.primary_keys)
+    order_by = ", ".join(
+        [quote_identifier(_EDS_MVCC) + " DESC NULLS LAST", quote_identifier(_EDS_TIMESTAMP) + " DESC",
+         quote_identifier(_EDS_SEQ) + " DESC"]
+    )
+    return (
+        f"CREATE OR REPLACE VIEW {quote_identifier(s.table + '_current')} AS\n"
+        f"SELECT\n"
+        f"{obj_lines}\n"
+        f"FROM {quote_identifier(s.table)}\n"
+        f"QUALIFY ROW_NUMBER() OVER (\n"
+        f"\tPARTITION BY {partition}\n"
+        f"\tORDER BY {order_by}\n"
+        f") = 1\n"
+        f"\tAND {quote_identifier(_EDS_OPERATION)} <> 'DELETE';\n"
+    )
+
+
+def create_timeline_view_sql(s: Schema) -> str:
+    """FEATURE(audit-mode): SCD-Type-2 point-in-time view (§3.4d) — valid_from = mvcc, valid_to = LEAD(mvcc)
+    over the PK partition (NULL = still valid); includes deletes."""
+    obj_lines = "".join("\t" + quote_identifier(c) + ",\n" for c in s.columns())
+    partition = ",".join(quote_identifier(pk) for pk in s.primary_keys)
+    order_by = ", ".join(
+        [quote_identifier(_EDS_MVCC) + " ASC", quote_identifier(_EDS_TIMESTAMP) + " ASC",
+         quote_identifier(_EDS_SEQ) + " ASC"]
+    )
+    return (
+        f"CREATE OR REPLACE VIEW {quote_identifier(s.table + '_timeline')} AS\n"
+        f"SELECT\n"
+        f"{obj_lines}"
+        f"\t{quote_identifier(_EDS_OPERATION)},\n"
+        f"\t{quote_identifier(_EDS_MVCC)} AS {quote_identifier('valid_from')},\n"
+        f"\tLEAD({quote_identifier(_EDS_MVCC)}) OVER (\n"
+        f"\t\tPARTITION BY {partition}\n"
+        f"\t\tORDER BY {order_by}\n"
+        f"\t) AS {quote_identifier('valid_to')}\n"
+        f"FROM {quote_identifier(s.table)};\n"
+    )
+
+
 def get_connection_string_from_url(url_string: str) -> str:
     """PARITY: GetConnectionStringFromURL — gosnowflake DSN form (golden; the real connector uses kwargs)."""
     u = gourl.parse(url_string)

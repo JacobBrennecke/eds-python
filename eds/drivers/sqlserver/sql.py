@@ -234,6 +234,140 @@ def add_new_columns_sql(logger: Logger | None, columns: list[str], s: Schema, db
     return res
 
 
+# ===================================================================================================
+# FEATURE(audit-mode): append / audit-trail SQL — NOT a Go port. See migration/features/audit-mode.md §3.3.
+# Strictly additive: the MERGE upsert builders above are untouched. Each statement is its own Exec (no GO).
+# ===================================================================================================
+
+_EDS_SEQ = "_eds_seq"
+_EDS_OPERATION = "_eds_operation"
+_EDS_MVCC = "_eds_mvcc_timestamp"
+_EDS_TIMESTAMP = "_eds_timestamp"
+_EDS_APPENDED_AT = "_eds_appended_at"
+
+
+def to_append_sql(c: DBChangeEvent, model: Schema) -> str:
+    """FEATURE(audit-mode): one plain INSERT per change (NO MERGE). Reuses the upsert insert-value path
+    (to_json_string_val quote_scalar=False + handle_schema_property for non-id cols) so each row is a
+    byte-sibling of the upsert SQL; DELETE → tombstone (PK value(s) + NULLs). §3.3."""
+    columns = model.columns()
+    vals: list[str] = []
+    if c.operation == "DELETE":
+        keys = c.key or []
+        for name in columns:
+            if name in model.primary_keys:
+                vals.append(quote_value(keys[model.primary_keys.index(name)]))
+            else:
+                vals.append("NULL")
+    else:
+        o = c.get_object() or {}
+        for name in columns:
+            prop = model.properties.get(name, SchemaProperty())
+            if name in o:
+                # FEATURE(audit-mode): append uses ONLY to_json_string_val — NO handle_schema_property (which
+                # would coerce a present-null int/bool to '0'). Append cols are nullable, so a present null
+                # passes through as NULL, matching PG/MySQL and the C# MssqlSql append path.
+                vals.append(to_json_string_val(name, quote_value(o[name]), prop, False))
+            else:
+                vals.append("NULL")  # FEATURE(audit-mode): missing col → NULL (cols are nullable in append)
+    vals.append(quote_value(c.operation))
+    # FEATURE(audit-mode): bare numeric literal; falsy ("" or JSON-null None) → NULL
+    vals.append(c.mvcc_timestamp if c.mvcc_timestamp else "NULL")
+    vals.append(str(c.timestamp))
+    cols = ",".join(
+        [quote_identifier(n) for n in columns]
+        + [quote_identifier(_EDS_OPERATION), quote_identifier(_EDS_MVCC), quote_identifier(_EDS_TIMESTAMP)]
+    )
+    return f"INSERT INTO {quote_identifier(c.table)} ({cols}) VALUES ({','.join(vals)});\n"
+
+
+def create_append_sql(s: Schema) -> str:
+    """FEATURE(audit-mode): the history base table + index (§3.3a). Object cols keep their upsert types but
+    NULLABLE except PK(s); _eds_seq IDENTITY is the surrogate PK. Drops both views then the table (no GO);
+    no trailing ';' on CREATE TABLE / CREATE INDEX (matches the upsert create_sql convention)."""
+    table = quote_identifier(s.table)
+    lines = []
+    for name in s.columns():
+        prop = s.properties.get(name, SchemaProperty())
+        is_pk = name in s.primary_keys
+        not_null = " NOT NULL" if is_pk else ""  # FEATURE: only PK(s) NOT NULL in append
+        lines.append("\t" + quote_identifier(name) + " " + prop_type_to_sql_type(prop, is_pk) + not_null + ",\n")
+    body = "".join(lines)
+    body += "\t" + quote_identifier(_EDS_SEQ) + " BIGINT IDENTITY(1,1) PRIMARY KEY,\n"
+    body += "\t" + quote_identifier(_EDS_OPERATION) + " NVARCHAR(16) NOT NULL,\n"
+    body += "\t" + quote_identifier(_EDS_MVCC) + " DECIMAL(38,10),\n"
+    body += "\t" + quote_identifier(_EDS_TIMESTAMP) + " BIGINT,\n"
+    body += "\t" + quote_identifier(_EDS_APPENDED_AT) + " DATETIME2(6) NOT NULL DEFAULT SYSUTCDATETIME()"
+    # FEATURE(audit-mode): PK idents join with no-space "," (cross-port w/ C# + PARTITION BY); ", " before DESC.
+    idx_cols = (
+        ",".join(quote_identifier(pk) for pk in s.primary_keys)
+        + ", " + ", ".join([quote_identifier(_EDS_MVCC) + " DESC", quote_identifier(_EDS_TIMESTAMP) + " DESC",
+                            quote_identifier(_EDS_SEQ) + " DESC"])
+    )
+    idx = quote_identifier("ix_" + s.table + "_id_mvcc")
+    return (
+        f"DROP VIEW IF EXISTS {quote_identifier(s.table + '_timeline')};\n"
+        f"DROP VIEW IF EXISTS {quote_identifier(s.table + '_current')};\n"
+        f"DROP TABLE IF EXISTS {table};\n"
+        f"CREATE TABLE {table} (\n{body}\n)\n"
+        f"CREATE INDEX {idx} ON {table} ({idx_cols})"
+    )
+
+
+def create_current_view_sql(s: Schema) -> str:
+    """FEATURE(audit-mode): latest-per-object view (§3.3c) — ROW_NUMBER() = 1 per PK partition, excluding rows
+    whose latest change is a DELETE. SQL Server sorts NULL mvcc last under DESC natively. CREATE VIEW must be
+    first in its batch — satisfied by the per-statement migration Exec."""
+    obj_csv = ",".join(quote_identifier(c) for c in s.columns())
+    partition = ",".join(quote_identifier(pk) for pk in s.primary_keys)
+    order_by = ", ".join(
+        [quote_identifier(_EDS_MVCC) + " DESC", quote_identifier(_EDS_TIMESTAMP) + " DESC",
+         quote_identifier(_EDS_SEQ) + " DESC"]
+    )
+    return (
+        f"CREATE VIEW {quote_identifier(s.table + '_current')} AS\n"
+        f"SELECT {obj_csv}\n"
+        f"FROM (\n"
+        f"\tSELECT {obj_csv},{quote_identifier(_EDS_OPERATION)},\n"
+        f"\t\tROW_NUMBER() OVER (\n"
+        f"\t\t\tPARTITION BY {partition}\n"
+        f"\t\t\tORDER BY {order_by}\n"
+        f"\t\t) AS _eds_rn\n"
+        f"\tFROM {quote_identifier(s.table)}\n"
+        f") AS ranked\n"
+        f"WHERE _eds_rn = 1 AND {quote_identifier(_EDS_OPERATION)} <> 'DELETE'"
+    )
+
+
+def create_timeline_view_sql(s: Schema) -> str:
+    """FEATURE(audit-mode): SCD-Type-2 point-in-time view (§3.3d) — valid_from = mvcc, valid_to = LEAD(mvcc)
+    over the PK partition (NULL = still valid); includes deletes."""
+    obj_csv = ",".join(quote_identifier(c) for c in s.columns())
+    partition = ",".join(quote_identifier(pk) for pk in s.primary_keys)
+    order_by = ", ".join(
+        [quote_identifier(_EDS_MVCC) + " ASC", quote_identifier(_EDS_TIMESTAMP) + " ASC",
+         quote_identifier(_EDS_SEQ) + " ASC"]
+    )
+    return (
+        f"CREATE VIEW {quote_identifier(s.table + '_timeline')} AS\n"
+        f"SELECT {obj_csv},{quote_identifier(_EDS_OPERATION)},\n"
+        f"\t{quote_identifier(_EDS_MVCC)} AS valid_from,\n"
+        f"\tLEAD({quote_identifier(_EDS_MVCC)}) OVER (\n"
+        f"\t\tPARTITION BY {partition}\n"
+        f"\t\tORDER BY {order_by}\n"
+        f"\t) AS valid_to\n"
+        f"FROM {quote_identifier(s.table)}"
+    )
+
+
+def drop_views_sql(s: Schema) -> list[str]:
+    """FEATURE(audit-mode): drop both views (timeline then current) for the add-column migration."""
+    return [
+        f"DROP VIEW IF EXISTS {quote_identifier(s.table + '_timeline')};",
+        f"DROP VIEW IF EXISTS {quote_identifier(s.table + '_current')};",
+    ]
+
+
 def parse_url_to_dsn(urlstr: str) -> str:
     """PARITY: ParseURLToDSN — the go-mssqldb DSN builder (golden-tested; distinct from the real connect)."""
     u = gourl.parse(urlstr)

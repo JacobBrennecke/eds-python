@@ -21,6 +21,7 @@ from eds.driver import (
     DriverField,
     FieldError,
     ImporterConfig,
+    IngestMode,
     new_database_configuration,
     url_from_database_configuration,
 )
@@ -63,6 +64,7 @@ class SqlDriverBase:
         self._executor: Callable[[str], None] | None = None
         self._stopped = False
         self._lock = threading.Lock()
+        self._mode: IngestMode = IngestMode.UPSERT  # FEATURE(audit-mode): captured in start(); drivers branch on it
 
     # ---- per-driver hooks (subclass MUST override the SQL/connection ones) ----
 
@@ -85,6 +87,28 @@ class SqlDriverBase:
         raise NotImplementedError
 
     def to_sql(self, event: DBChangeEvent, schema: Schema) -> str:
+        raise NotImplementedError
+
+    # ---- FEATURE(audit-mode): append-mode per-driver hooks (defaults delegate/raise) ----
+    def to_append_sql(self, event: DBChangeEvent, schema: Schema) -> str:
+        """FEATURE(audit-mode): the per-event append builder (plain INSERT + audit cols). Default delegates to
+        the upsert builder so a non-append driver is unaffected; append drivers override this."""
+        return self.to_sql(event, schema)
+
+    def create_append_table_sql(self, schema: Schema) -> str:
+        """FEATURE(audit-mode): the history base table (+ index) DDL. Append drivers must override."""
+        raise NotImplementedError
+
+    def create_current_view_sql(self, schema: Schema) -> str:
+        """FEATURE(audit-mode): the <table>_current latest-per-object view. Append drivers must override."""
+        raise NotImplementedError
+
+    def create_timeline_view_sql(self, schema: Schema) -> str:
+        """FEATURE(audit-mode): the <table>_timeline SCD-2 view. Append drivers must override."""
+        raise NotImplementedError
+
+    def drop_views_sql(self, schema: Schema) -> list[str]:
+        """FEATURE(audit-mode): the DROP VIEW statements (used by the add-column migration). Override."""
         raise NotImplementedError
 
     def to_sql_from_object(
@@ -134,6 +158,7 @@ class SqlDriverBase:
         self._logger = config.logger.with_prefix(self.log_prefix())
         self._ctx = config.context
         self._registry = config.schema_registry
+        self._mode = config.ingest_mode  # FEATURE(audit-mode): resolved upsert/append mode for this driver
         self._db = self._connect_to_db(config.context, config.url)
 
     def _connect_to_db(self, ctx: Any, url: str) -> SqlDb:
@@ -194,7 +219,11 @@ class SqlDriverBase:
             schema = self._registry.get_schema(event.table, version)
         except Exception as e:
             raise ValueError(f"unable to get schema for table: {event.table} ({version}). {e}") from e
-        sql = self.to_sql(event, schema)
+        # FEATURE(audit-mode): pick the append builder when in append mode; else the unchanged upsert builder.
+        if self._mode == IngestMode.APPEND:
+            sql = self.to_append_sql(event, schema)
+        else:
+            sql = self.to_sql(event, schema)
         logger.trace("sql: %s", sql)
         with self._lock:
             self._pending.append(sql)
@@ -218,6 +247,20 @@ class SqlDriverBase:
     def migrate_new_table(self, ctx: Any, logger: Logger, schema: Schema) -> None:
         """PARITY: MigrateNewTable — drop+recreate if the table exists, else create."""
         assert self._db is not None
+        if self._mode == IngestMode.APPEND:  # FEATURE(audit-mode): history table + two views (per-statement Exec)
+            if schema.table in self._dbschema:
+                logger.info("table already exists for: %s, dropping and recreating...", schema.table)
+            # The history DDL block self-drops (DROP TABLE … CASCADE / DROP VIEW … then DROP TABLE); each view
+            # is its own Exec so a CREATE VIEW is always first in its batch (SQL Server requirement).
+            for stmt in (
+                self.create_append_table_sql(schema),
+                self.create_current_view_sql(schema),
+                self.create_timeline_view_sql(schema),
+            ):
+                logger.trace("migrate new table (append): %s", stmt)
+                self._db.exec(stmt)
+            self._refresh_schema(self._db, fail_if_empty=True)
+            return
         if schema.table in self._dbschema:
             logger.info("table already exists for: %s, dropping and recreating...", schema.table)
             self._db.drop_table(self.quote_identifier(schema.table))
@@ -229,6 +272,19 @@ class SqlDriverBase:
     def migrate_new_columns(self, ctx: Any, logger: Logger, schema: Schema, columns: list[str]) -> None:
         """PARITY: MigrateNewColumns — one ALTER per new column, then refresh."""
         assert self._db is not None
+        if self._mode == IngestMode.APPEND:  # FEATURE(audit-mode): DROP both views, ALTER, then recreate them
+            for stmt in self.drop_views_sql(schema):
+                logger.trace("dropping views before add-column (append): %s", stmt)
+                self._db.exec(stmt)
+            for sql in self.add_new_columns_sql(logger, columns, schema, self._dbschema):
+                logger.trace("migrating new columns (append): %s", sql)
+                self._db.exec(sql)
+                logger.debug("migrated new columns (append): %s", sql)
+            for stmt in (self.create_current_view_sql(schema), self.create_timeline_view_sql(schema)):
+                logger.trace("recreating view after add-column (append): %s", stmt)
+                self._db.exec(stmt)
+            self._refresh_schema(self._db, fail_if_empty=True)
+            return
         for sql in self.add_new_columns_sql(logger, columns, schema, self._dbschema):
             logger.trace("migrating new columns: %s", sql)
             self._db.exec(sql)

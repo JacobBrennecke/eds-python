@@ -5,6 +5,12 @@ from code with `# DEVIATION: see DEVIATIONS.md#<anchor>`. Faithfulness is the de
 records the exceptions (language/runtime/package differences) for review. Quirks that are
 *reproduced* (not deviated) live as `# PARITY:` markers in code, not here.
 
+**Three markers (read before auditing):** `# PARITY:` = reproduces Go; `# DEVIATION:` = a justified port
+difference *while implementing a Go behavior* (still references Go). `# FEATURE(<name>):` = **net-new behavior
+with NO Go counterpart** — a deliberate, intentional divergence. `FEATURE`-marked code is OUT of scope for Go-parity
+audits (do not hunt for a Go equivalent); it is IN scope for its own contract + the cross-port twin. The first such
+feature is **audit-mode** — see `migration/features/audit-mode.md` (the cross-port oracle, since Go is not).
+
 ---
 
 ### python-310-64bit
