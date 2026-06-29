@@ -139,6 +139,10 @@ def _run_wrapper_loop(logger: Logger, argv: list[str]) -> int:
             if kind == "restart":
                 _terminate(proc)
                 _drain_exited(events)
+                # DEFERRED(parity): RT-03 wrapper upgrade-failure binary reset — Go tracks an `inUpgrade` flag and,
+                #   on a FAILED post-upgrade restart, resets child_cmd[0] to the original os.Args[0], increments
+                #   failures, and re-spawns the prior binary (server.go:327,340-341,410-416). Dormant until the
+                #   self-upgrade closure (RT-01) lands. See migration/DEFERRALS.md#rt-03.
                 continue  # re-spawn (the on-disk binary may have been swapped by an upgrade)
             if kind == "shutdown":
                 # PARITY: the child already received the console Ctrl-C — let it shut down gracefully (Go signals

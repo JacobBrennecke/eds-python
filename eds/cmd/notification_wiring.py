@@ -215,6 +215,10 @@ def build_notification_handler(ctx: ControlPlaneContext) -> NotificationHandler:
         # swaps the RUNNING executable, which is only coherent for the M10 packaged single binary AND once Python
         # release artifacts exist (today's GitHub assets are Go binaries). The download MODULE (eds/upgrade) + the
         # `eds download` command ARE ported and usable; the in-place self-upgrade lands with M10 packaging.
+        # DEFERRED(parity): RT-04 downloaded-binary version verify (exec `<downloaded> version`, compare to the
+        #   requested version before swap; server.go:646-670) — see migration/DEFERRALS.md#rt-04.
+        # DEFERRED(parity): RT-02 restart-via-parent (GET http://127.0.0.1:{parent_port}/restart after the swap;
+        #   server.go:690) belongs HERE after a successful apply — see migration/DEFERRALS.md#rt-02.
         ctx.logger.warn("self-upgrade requires the packaged single binary (not yet available); skipping")
         return UpgradeResponse(
             success=False, message="self-upgrade requires the packaged binary (not yet available)",

@@ -366,5 +366,54 @@ segments the masked bytes differ (the masked `DriverMeta.url` wire field). NOT a
 are still masked, just with different masked bytes for exotic inputs). Accepted (reimplementing on gourl is deferred;
 no normal connection string is affected).
 
+## Streaming-driver deviations (s3 / kafka / eventhub)
+
+### help-generate-section
+`util.generate_help_section` (Go `util.GenerateHelpSection`) emits PLAIN `title + "\n\n" + body`. Go colorizes
+via fatih/color (green title + white-bold body), but fatih/color AUTO-DISABLES on a non-TTY, so on every
+non-interactive run Go already emits exactly this plain text; the C# port made the identical choice (Help.cs).
+The output is byte-identical after `ansi_strip` (which the driver-configurations metadata path applies). The
+SQL/Snowflake `help()` bodies stay `""` (see `sql-driver-help-deferred`); only the s3/kafka/eventhub drivers
+populate a help section. (Terminal coloring can be layered later behind a TTY check.)
+
+### s3-buffered-upload
+Go's s3 driver streams each event through a worker-pool channel during `Process` (uploadTasks goroutines upload
+concurrently; `Flush` waits on the job WaitGroup and joins the buffered errors). The port buffers `(key, event)`
+per batch and uploads them at `Flush` with bounded concurrency (a `ThreadPoolExecutor(max_workers=uploadTasks)`),
+joining errors there. SAME object bytes, SAME keys, and the SAME error-surfacing point (`Flush`). This mirrors
+the C# port (`DEVIATIONS.md#s3-buffered-upload` there). `maxBatchSize` (which only sized Go's channel) is still
+parsed/validated at connect — a non-empty unparseable value still aborts startup — but is otherwise unused.
+
+### s3-gcs-resign-not-ported
+Go re-signs GCS requests with a `RecalculateV4Signature` RoundTripper to work around aws-sdk-go-v2 mutating the
+`Accept-Encoding` header AFTER signing. That is an aws-sdk-go-v2-specific bug; boto3/botocore do not exhibit it,
+so the re-sign transport is not reproduced (the C# port reached the same conclusion). For the Google provider the
+port instead sets `request_checksum_calculation = "when_required"` (the botocore analog of Go's
+`RequestChecksumCalculation = WhenRequired`) so GCS's S3-interop layer does not reject flexible-checksum headers.
+S3/GCS connect paths are behind the lazy boto3 import and are exercised only by the Docker-gated e2e.
+
+### kafka-explicit-partition
+Go uses segmentio/kafka-go's pluggable `Balancer`, which the broker driver calls with the live partition list at
+send time. librdkafka (confluent-kafka) cannot host a managed partitioner, so the port resolves the topic's
+partition count from metadata (`Producer.list_topics`) and computes the partition itself
+(`balance(header, key, count)` = `Modulo(Hash(input), count)`), then produces to that explicit partition —
+preserving Go's header-based ordering. If the partition count cannot be resolved the failure propagates so
+`Flush` preserves `_pending` and NAKs (matching Go's `WriteMessages` error path). Same approach as the C# port.
+
+### kafka-leader-retry
+Go decides the 10s leader-not-available retry via `strings.Contains(err.Error(), "Leader Not Available")` —
+segmentio/kafka-go's title-cased message. confluent-kafka/librdkafka instead surfaces a `KafkaError` whose
+`code()` is `LEADER_NOT_AVAILABLE` and whose text is the lowercase `"Broker: Leader not available"`, so the Go
+substring would NEVER match (immediate NAK, losing Go's grace). `is_leader_not_available` therefore matches the
+error CODE first (the robust signal) and falls back to a case-insensitive substring (covers wrapped/string
+errors); `_resolve_partition_count` re-raises a topic-metadata error as a `KafkaException` so a leader-not-available
+metadata failure is retryable too. Mirrors the C# port (KafkaDriver.cs:138-142 — code check + substring fallback).
+
+### fork-port-default
+Go's hidden `fork --port` flag defaults to the literal `0` (cmd/fork.go:306); the server ALWAYS forwards an
+explicit `--port` to the fork (cmd/server.go:539), so the default is rarely hit. The port defaults `fork --port`
+to the literal `8080` (not `$PORT` — Go's fork ignores the env var) so a directly-invoked fork has a usable
+health/metrics port; the CLI `--port` overrides it. The server path is unaffected (it passes `--port` explicitly).
+
 <!-- Add further deviations below as they arise (carry over the C# port's where they recur:
      file-uri-windows-drive-letter, download-zip-extract). -->

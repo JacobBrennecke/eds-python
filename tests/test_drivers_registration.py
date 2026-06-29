@@ -34,3 +34,29 @@ def test_register_all_resolves_drivers_and_aliases() -> None:
         assert errs == []
     finally:
         d.reset_registries()
+
+
+def test_register_all_includes_streaming_drivers() -> None:
+    # PARITY: register_all wires all 9 Go schemes — the 3 streaming drivers (s3/kafka/eventhub) too.
+    d.reset_registries()
+    try:
+        register_all()
+        configs = d.get_driver_configurations()
+        assert set(configs) == {
+            "postgres", "mysql", "sqlserver", "snowflake", "snowflake-keypair",
+            "file", "s3", "kafka", "eventhub",
+        }
+        assert _meta("s3://bucket").name == "AWS S3"
+        assert _meta("kafka://h:9092/t").name == "Kafka"
+        assert _meta("eventhub://h.servicebus.windows.net/;EntityPath=e").name == "Microsoft Azure EventHub"
+        # all three are importers and none support migration
+        for url in ("s3://bucket", "kafka://h:9092/t", "eventhub://h.servicebus.windows.net/;EntityPath=e"):
+            m = _meta(url)
+            assert m.supports_import is True
+            assert m.supports_migration is False
+        # streaming drivers register a SEPARATE instance per registry (driver vs importer)
+        drv = d._resolve_driver("s3")
+        imp = d.new_importer(None, None, "s3://bucket", None)
+        assert drv is not imp
+    finally:
+        d.reset_registries()

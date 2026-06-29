@@ -12,10 +12,17 @@ dependencies = [
     "tomli; python_version < '3.11'",
     "pgpy",
     "jsonschema",
+    "prometheus-client",  # metrics.py imports it top-level (server/fork crash on a clean install without it)
+    "psutil",             # metrics.py + sysinfo.py (system stats, get_local_ip at session start); lazy-imported
+    "boto3",            # s3 driver (AWS / GCS-interop / LocalStack); lazy-imported at connect
+    "confluent-kafka",  # kafka driver (librdkafka producer); lazy-imported at connect
+    "azure-eventhub",   # eventhub driver (Azure Event Hubs producer); lazy-imported at connect
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "mypy"]
+# pytest-asyncio: asyncio_mode="auto" + filterwarnings=error means a clean install can't even COLLECT the
+# async tests without it (the asyncio_* ini options raise an unknown-config error otherwise).
+dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
 
 [project.scripts]
 eds = "eds.__main__:main"

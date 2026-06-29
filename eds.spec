@@ -13,8 +13,11 @@ datas = [("eds/shopmonkey.asc", "eds")]
 datas += collect_data_files("jsonschema_specifications")  # the bundled draft meta-schemas
 
 hiddenimports = collect_submodules("eds")
+# psutil is lazy-imported by metrics.py + sysinfo.py; boto3/confluent_kafka/azure.eventhub are lazy-imported
+# inside the s3/kafka/eventhub drivers — PyInstaller's static analysis misses these function-level imports.
 for _mod in ("psycopg", "pymysql", "pymssql", "snowflake.connector", "pgpy",
-             "jsonschema", "referencing", "msgpack", "xxhash", "nats", "nkeys", "tomli"):
+             "jsonschema", "referencing", "msgpack", "xxhash", "nats", "nkeys", "tomli",
+             "psutil", "prometheus_client", "boto3", "confluent_kafka", "azure.eventhub"):
     try:
         __import__(_mod)
     except ImportError:

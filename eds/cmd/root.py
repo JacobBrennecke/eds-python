@@ -133,7 +133,11 @@ def build_parser() -> _Parser:
     fork.add_argument("--url", default="", help=argparse.SUPPRESS)
     fork.add_argument("--api-url", default=_DEFAULT_API_URL, help=argparse.SUPPRESS)
     fork.add_argument("--server", dest="nats_url", default=_DEFAULT_NATS_URL, help=argparse.SUPPRESS)
-    fork.add_argument("--port", type=int, default=get_os_int("PORT", 8080), help=argparse.SUPPRESS)
+    # PARITY: the server always forwards an explicit --port to the fork (server.go:539), so the default is
+    # rarely hit. DEVIATION: see DEVIATIONS.md#fork-port-default — Go's fork default is the literal 0
+    # (cmd/fork.go:306); the port chooses a fixed literal 8080 so a directly-invoked fork has a usable
+    # health/metrics port, and does NOT read $PORT (Go's fork ignores it). The CLI --port overrides 8080.
+    fork.add_argument("--port", type=int, default=8080, help=argparse.SUPPRESS)
     # FEATURE(audit-mode): hidden on `fork`; the server forwards the RESOLVED value here. Default UPSERT keeps a
     # directly-invoked fork byte-identical to today. args.mode is always an IngestMode (default or parsed).
     fork.add_argument("--mode", type=parse_ingest_mode, default=IngestMode.UPSERT, help=argparse.SUPPRESS)
@@ -167,6 +171,11 @@ def build_parser() -> _Parser:
     en = sub.add_parser("enroll", parents=[base], help="enroll a new server and get an api key", allow_abbrev=False)
     en.add_argument("code")
     en.add_argument("--api-url", default="", help=argparse.SUPPRESS)
+
+    # DEFERRED(parity): `integrationtest` command + subcommands (loadtest-random, publish-file-data) and the
+    #   internal/integrationtest package (NATS load generator + JSONL.tar.gz replayer) — dev/test harness only.
+    #   The `e2e` build-tagged command is likewise omitted (replaced by pytest tests/test_*_e2e.py).
+    #   See migration/DEFERRALS.md#integrationtest and #e2e-command.
 
     return parser
 
