@@ -1,6 +1,6 @@
 [project]
 name = "eds"
-version = "0.0.1"
+version = "1.0.0"
 description = "Shopmonkey Enterprise Data Streaming (EDS) consumer — faithful Python port of edsGolang"
 requires-python = ">=3.10"
 # Runtime deps are installed per-milestone (see migration/package-map.md); this list grows as milestones land.
