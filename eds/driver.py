@@ -92,6 +92,12 @@ class ImporterConfig:
     schema_only: bool = False
     no_delete: bool = False
     context: Any = None
+    # FEATURE(import-recovery): per-table durability + cross-restart resume (gated; default OFF keeps the single
+    # end-of-run flush byte-for-byte identical to Go). When enabled the importer flushes at each table boundary and
+    # writes an `import-progress:{run_id}:{table}` marker to the tracker. See features/import-recovery.md §1b/§2.4.
+    recovery_enabled: bool = False
+    run_id: str = ""
+    tracker: Any = None
 
 
 @dataclass

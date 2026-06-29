@@ -415,5 +415,50 @@ explicit `--port` to the fork (cmd/server.go:539), so the default is rarely hit.
 to the literal `8080` (not `$PORT` — Go's fork ignores the env var) so a directly-invoked fork has a usable
 health/metrics port; the CLI `--port` overrides it. The server path is unaffected (it passes `--port` explicitly).
 
+## Features (net-new behavior; Go is NOT the oracle)
+
+### import-recovery
+**This is a FEATURE, not a deferral.** Net-new import-level recovery/retry with NO Go counterpart (Go's import
+`Fatal`s on the first failed table; its only retry is the per-HTTP-request `HttpRetry`). The cross-port oracle
+is `migration/features/import-recovery.md` (NOT the Go source) — both the Python and .NET ports MUST behave
+identically and assert against the contract there; Go-parity audits SKIP `FEATURE(import-recovery)`-marked code.
+The binding cross-port decisions live in §1c (REVIEW RECONCILIATION) and override §2's older prose. Summary of
+what landed in this port (all tagged `# FEATURE(import-recovery):`):
+- `is_recoverable(err)` (`eds/cmd/import_cmd.py`) — the §1c.4 matrix, classify by EXCEPTION TYPE first then the
+  canonical shared substring set (`connection reset | connection refused | broken pipe | timed out | EOF | no
+  such host | tls handshake | dns`). Retry: builtin `ConnectionError`/`TimeoutError` (+ requests' network errors
+  routed by substring), HTTP `408/429/500/502/503/504`, download HTTP/network IO. FATAL: malformed URL
+  (`ValueError`→exit 3), `PermissionError`, disk-full/other LOCAL `OSError` (errno in `_FATAL_ERRNOS`),
+  `401/403/400/404/422`, schema/config, cancellation, unknown. (FIX: no longer blanket-retries ALL `OSError`.)
+  Backed by `ApiStatusError` (`eds/cmd/session.py`), which carries the HTTP status while keeping the message
+  byte-identical so the `--max-retries 0` path is unchanged.
+- `failed_tables(job)` (`eds/cmd/import_client.py`) — additive sibling of the raise-on-first `check_export_job`
+  (the raise wrapper is kept for the `--max-retries 0` / disabled path). Export-stage `Failed` is handled INLINE
+  in the recovery loop (never raised), so there is NO `Export*Failed` exception type (removed per §1c.10).
+- `run_with_recovery(...)` (`eds/cmd/import_cmd.py`) — wraps export→poll→download→import with the LOCKED ladder
+  `[30,60,120,240,480]` (`backoff_ladder`, 5 retries / 6 attempts == `30*2^n`), reusing the injectable `sleep`
+  seam. The recall (§1c.1): export-stage `Failed` ⇒ POST `/v3/export/bulk {tables:[failed], companyIds,
+  timeOffset}` minting a NEW jobId; a TRANSIENT download / load-stage failure ⇒ GET re-download the SAME job; a
+  download URL-EXPIRY (HTTP 403/410, `DownloadStageError.expired`) ⇒ POST a new job. The original run's
+  `timeOffset` is captured in `ImportPlan` and reused in every recall POST (§1c.10). §1c.3: when the concrete
+  table set was never learned (poll failed) on a FULL import, the scope is the FULL set — a recoverable failure
+  NEVER collapses to "0 tables → EXIT_SUCCESS"; exhaustion there records `["*"]` and exits 1.
+- `run_id` = §1c.2 canonical formula `eds_hash("|".join([driver_url, sorted(only), sorted(companyIds),
+  sorted(locationIds), str(timeOffset)]))` (driver_url FIRST, lists SORTED, `"|"` sep) — pinned by a golden vector.
+- Per-table durability + cross-restart resume (`eds/importer/__init__.py` `ImportFlusher` + the gated
+  table-grouped loop; `eds/drivers/sql_base.py` `flush_imported`): `import-progress:{run_id}:{table}` markers
+  written after each table durably flushes; a (re)started import resumes only the not-yet-completed tables and
+  resets the markers on whole-run success. Gated behind `ImporterConfig.recovery_enabled`. §1c.5: re-truncate
+  (`create_datasource`) is gated on NOT `--no-delete` — a `--no-delete`/audit retry RE-APPENDS the in-flight table
+  (PK-safe at-least-once) rather than dropping the audit trail. §1c.9: streaming sinks (kafka/eventhub/s3/file)
+  get per-RUN resume only (at-least-once on retry — downstream must tolerate dupes).
+- Soft after-exhaustion (§1b OQ-4): a permanently-failed set is logged + recorded (`import-failed:{run_id}`),
+  the rest of the run continues, and the run exits 1 (never 3). The server-triggered fork maps a non-usage
+  exit-1 to "start the consumer" (faithful to Go), so a partial soft-exhaustion does NOT block streaming.
+- `--max-retries` flag (`eds/cmd/root.py`, default 5; 0 = exact Go; bad/negative clamps to 0 per §1c.6) +
+  `import_max_retries` config (`resolve_max_retries`, precedence flag > config.toml > 5, persisted via
+  `set_config_value`, like `--mode`).
+- Tests: `tests/test_import_recovery.py`.
+
 <!-- Add further deviations below as they arise (carry over the C# port's where they recur:
      file-uri-windows-drive-letter, download-zip-extract). -->

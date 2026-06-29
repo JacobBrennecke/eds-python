@@ -38,6 +38,21 @@ class Config:
         v = self._v.get(key)
         return default if v is None else bool(v)
 
+    def get_int(self, key: str, default: int = 0) -> int:
+        # FEATURE(import-recovery): read import_max_retries from config.toml (TOML ints decode to int; a
+        # string value is parsed; bool — an int subclass — is treated as absent). Mirrors viper.GetInt leniency.
+        v = self._v.get(key)
+        if isinstance(v, bool):
+            return default
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str):
+            try:
+                return int(v)
+            except ValueError:
+                return default
+        return default
+
     def as_dict(self) -> dict:
         return dict(self._v)
 

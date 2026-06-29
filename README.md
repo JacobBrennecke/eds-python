@@ -78,6 +78,10 @@ This command will import data from the Shopmonkey Database into PostgreSQL datab
 
 The import command will ensure that you have a valid EDS session before running an import. It will ensure that any data that is processed during the import processed will automatically be skipped when the server is started after the import to ensure duplicates aren't processed.
 
+### Automatic Recovery
+
+If an import run hits a recoverable error — a network or transport failure, a timeout, an HTTP `5xx`/`429`, or a failed table export — it automatically recovers: it detects which table(s) failed, re-exports and re-imports just those tables (re-downloading the existing export job while its URLs are still valid, otherwise starting a fresh export of the failed tables), and continues. Retries use exponential backoff over five attempts — `30s, 60s, 120s, 240s, 480s`. Per-table progress is recorded, so a restarted import resumes only the tables that had not finished. If a table still cannot be imported after all retries, the error is logged and that table is recorded as failed, but the remaining tables are still imported so the server can start and begin processing real-time data (the failed tables can be retried later). Recovery is controlled by `--max-retries` (default `5`; `0` disables it).
+
 ## Running the Server
 
 > [!IMPORTANT]

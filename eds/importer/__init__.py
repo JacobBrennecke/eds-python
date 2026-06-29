@@ -31,6 +31,15 @@ class Handler(Protocol):
     def import_completed(self) -> None: ...
 
 
+@runtime_checkable
+class ImportFlusher(Protocol):
+    """FEATURE(import-recovery): a Handler that can flush + reset its pending buffer at a TABLE boundary, so a
+    per-table completion marker reflects a durably-committed write (§2.4). SQL drivers implement it via the
+    byte-batch flush; handlers without it fall back to the single end-of-run flush + end-of-run markers."""
+
+    def flush_imported(self) -> None: ...
+
+
 def _dur(seconds: float) -> str:
     # DEVIATION (duration-format): log-only, not byte-checked; Go renders time.Duration.String().
     if seconds < 1e-3:
@@ -41,7 +50,11 @@ def _dur(seconds: float) -> str:
 
 
 def run(logger: Logger, config: ImporterConfig, handler: Handler) -> None:
-    """PARITY: importer.Run."""
+    """PARITY: importer.Run.
+
+    FEATURE(import-recovery): when ``config.recovery_enabled`` is set the per-file replay is grouped by table and
+    a flush + ``import-progress:{run_id}:{table}`` marker is written at each table boundary (§2.4); the default
+    (disabled) path is byte-for-byte the Go single-flush behavior."""
     started = time.monotonic()
     try:
         schema = config.schema_registry.get_latest_schema()  # type: ignore[union-attr]
@@ -51,19 +64,13 @@ def run(logger: Logger, config: ImporterConfig, handler: Handler) -> None:
         handler.create_datasource(schema)
     if config.schema_only:  # PARITY: AFTER create_datasource
         return
-    total = 0
     try:
         files = list_dir(config.data_dir)
     except OSError as e:
         raise RuntimeError(f"unable to list files in directory: {e}") from e
 
-    for file in files:
-        table, unix_nano, ok = parse_crdb_export_file(file)
-        if not ok:
-            logger.debug("skipping file: %s", file)
-            continue
-        if table not in config.tables:  # PARITY: silent skip (no log)
-            continue
+    def process_file(file: str, table: str, unix_nano: int) -> int:
+        # PARITY: the per-file synthetic-event replay body (identical for both the legacy and recovery paths).
         data = schema.get(table)
         if data is None:
             raise RuntimeError(
@@ -140,8 +147,59 @@ def run(logger: Logger, config: ImporterConfig, handler: Handler) -> None:
         finally:
             dec.close()
 
-        total += count
         logger.debug("imported %d %s records in %s", count, table, _dur(time.monotonic() - tstarted))
+        return count
 
-    handler.import_completed()
+    if config.recovery_enabled:
+        total = _run_recovery(logger, config, handler, files, process_file)
+    else:
+        total = 0
+        for file in files:
+            table, unix_nano, ok = parse_crdb_export_file(file)
+            if not ok:
+                logger.debug("skipping file: %s", file)
+                continue
+            if table not in config.tables:  # PARITY: silent skip (no log)
+                continue
+            total += process_file(file, table, unix_nano)
+        handler.import_completed()
+
     logger.info("imported %d records from %d files in %s", total, len(files), _dur(time.monotonic() - started))
+
+
+def _write_progress_marker(config: ImporterConfig, table: str) -> None:
+    # FEATURE(import-recovery): record `import-progress:{run_id}:{table}` after a table durably flushes (§2.4).
+    if config.tracker is not None and config.run_id:
+        config.tracker.set_key(f"import-progress:{config.run_id}:{table}", "1")
+
+
+def _run_recovery(logger: Logger, config: ImporterConfig, handler: Handler, files, process_file) -> int:
+    """FEATURE(import-recovery): table-grouped replay with a per-table flush boundary + completion markers."""
+    files_by_table: dict[str, list[tuple[str, int]]] = {}
+    for file in files:
+        table, unix_nano, ok = parse_crdb_export_file(file)
+        if not ok:
+            logger.debug("skipping file: %s", file)
+            continue
+        if table not in config.tables:  # PARITY: silent skip (no log)
+            continue
+        files_by_table.setdefault(table, []).append((file, unix_nano))
+
+    flusher = handler if isinstance(handler, ImportFlusher) else None
+    total = 0
+    processed: list[str] = []
+    for table in config.tables:  # deterministic order
+        for file, unix_nano in files_by_table.get(table, []):
+            total += process_file(file, table, unix_nano)
+        if flusher is not None:
+            flusher.flush_imported()  # durable per-table flush BEFORE the marker
+            _write_progress_marker(config, table)
+        processed.append(table)
+    handler.import_completed()
+    if flusher is None:
+        # §1c.9 STREAMING SINKS (kafka / eventhub / s3 / file): no per-table mid-run flush boundary, so resume is
+        # per-RUN only — a retry may re-emit already-delivered records (AT-LEAST-ONCE; downstream must tolerate
+        # dupes). The single end-of-run flush just committed every table, so the markers are written now.
+        for table in processed:
+            _write_progress_marker(config, table)
+    return total

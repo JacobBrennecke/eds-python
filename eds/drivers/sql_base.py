@@ -331,6 +331,12 @@ class SqlDriverBase:
                 self._logger.error("offending sql: %s", batch)
                 raise ValueError(f"unable to execute sql: {e}") from e
 
+    def flush_imported(self) -> None:
+        # FEATURE(import-recovery): the ImportFlusher hook — flush + RESET pending at a table boundary so a
+        # per-table completion marker reflects a committed write (§2.4). No-op when nothing is buffered.
+        if self._size > 0:
+            self._flush_import()
+
     def _flush_import(self) -> None:
         assert self._executor is not None and self._logger is not None
         batch = "".join(self._pending)

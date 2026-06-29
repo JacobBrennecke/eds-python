@@ -29,6 +29,34 @@ TRACKER_TABLE_EXPORT_KEY = "table-export"
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
+# FEATURE(import-recovery): recovery-stage exception types (NO Go counterpart). They tag WHICH stage of the
+# export→poll→download→import unit failed so run_with_recovery can pick the right recall path (§1c.1: export-stage
+# Failed / EXPIRED download → POST a new job; transient download / load-stage → GET re-download the SAME job).
+# Note: export-stage Failed is detected via failed_tables(job) and handled INLINE in the recovery loop (never
+# raised), so there is NO Export*Failed exception type (removed per §1c.10). See features/import-recovery.md.
+class DownloadStageError(RuntimeError):
+    """FEATURE(import-recovery): a presigned-URL download failed. Recoverable. ``expired`` is True only when the
+    signed URLs are gone (HTTP 403/410) — then the recall POSTs a NEW job (§1c.1 path 2); otherwise the recall
+    GET-re-downloads the SAME job (§1c.1 path 1)."""
+
+    def __init__(self, message: str = "", *, expired: bool = False) -> None:
+        super().__init__(message)
+        self.expired = expired
+
+
+class UsageError(Exception):
+    """FEATURE(import-recovery): a fatal usage error (bad flags / setup) — exit 3, NEVER retried (§2.5)."""
+
+    def __init__(self, message: str, exit_code: int = 3) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+class RecoveryCancelled(Exception):
+    """FEATURE(import-recovery): the run was cancelled (shutdown) during recovery — abort immediately, do NOT
+    consume a retry (§2.5 cancellation is fatal)."""
+
+
 def _default_transport(method: str, url: str, headers: dict, data: Any = None) -> Any:
     import requests
 
@@ -174,21 +202,35 @@ def create_export_job(
     return decode_api_response(resp).get("jobId", "")
 
 
-def check_export_job(
+def _fetch_export_job(
     logger: Logger, api_url: str, api_key: str, job_id: str, *, version: str, transport: Transport | None = None
 ) -> ExportJobResponse:
-    """PARITY: checkExportJob — GET the job status; raises if any table failed."""
+    """GET the job status (no raise-on-Failed). Extracted so check_export_job (raise-on-first, parity) and the
+    recovery poll (collect-all, FEATURE) share the one transport call."""
     transport = transport or _default_transport
     url = f"{api_url}/v3/export/bulk/{job_id}"
     headers = set_http_header(api_key, version)
     resp: Any = HttpRetry(lambda: transport("GET", url, headers, None), method="GET", url=url, logger=logger).do()
     if resp.status_code != 200:
         raise handle_api_error(resp, "import")
-    job = ExportJobResponse.from_data(decode_api_response(resp))
+    return ExportJobResponse.from_data(decode_api_response(resp))
+
+
+def check_export_job(
+    logger: Logger, api_url: str, api_key: str, job_id: str, *, version: str, transport: Transport | None = None
+) -> ExportJobResponse:
+    """PARITY: checkExportJob — GET the job status; raises if any table failed."""
+    job = _fetch_export_job(logger, api_url, api_key, job_id, version=version, transport=transport)
     for table, td in job.tables.items():
         if td.status == "Failed":
             raise RuntimeError(f"error exporting table {table}: {td.error}")
     return job
+
+
+def failed_tables(job: ExportJobResponse) -> list[str]:
+    """FEATURE(import-recovery): the additive sibling of check_export_job's raise-on-first — the FULL set of
+    tables whose export Status == "Failed", in job order (§2.4). Empty when nothing failed."""
+    return [t for t, td in job.tables.items() if td.status == "Failed"]
 
 
 def is_cancelled(cancel: Any) -> bool:
@@ -197,9 +239,13 @@ def is_cancelled(cancel: Any) -> bool:
 
 def poll_until_complete(
     logger: Logger, api_url: str, api_key: str, job_id: str, *, version: str, cancel: Any = None,
-    transport: Transport | None = None, sleep: Any = None, now: Any = None,
+    transport: Transport | None = None, sleep: Any = None, now: Any = None, raise_on_failed: bool = True,
 ) -> ExportJobResponse | None:
-    """PARITY: pollUntilComplete — poll every 5s; log status at most once/minute. None on cancel."""
+    """PARITY: pollUntilComplete — poll every 5s; log status at most once/minute. None on cancel.
+
+    FEATURE(import-recovery): when ``raise_on_failed`` is False the poll does NOT raise on a per-table
+    ``Status=="Failed"``; instead it returns the job as soon as any table failed so the recovery loop can detect
+    + recall the failed subset (§2.4). The default (True) is byte-for-byte the Go behavior (raise-on-first)."""
     sleep = sleep or time.sleep
     now = now or time.monotonic
     last_printed: float | None = None
@@ -209,7 +255,12 @@ def poll_until_complete(
             logger.info("Checking for Export Status (%s)", job_id)
             last_printed = now()
             show_progress = True
-        job = check_export_job(logger, api_url, api_key, job_id, version=version, transport=transport)
+        if raise_on_failed:
+            job = check_export_job(logger, api_url, api_key, job_id, version=version, transport=transport)
+        else:
+            job = _fetch_export_job(logger, api_url, api_key, job_id, version=version, transport=transport)
+            if failed_tables(job):  # FEATURE(import-recovery): surface Failed tables to the recovery loop
+                return job
         if job.completed:
             logger.info("Export Progress: %s", job.progress_string())
             return job

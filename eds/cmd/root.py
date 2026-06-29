@@ -159,6 +159,10 @@ def build_parser() -> _Parser:
     imp.add_argument("--parallel", type=int, default=4, help="parallel upload tasks (if supported)")
     imp.add_argument("--single", action="store_true", help="insert one row at a time instead of batching")
     imp.add_argument("--only", action=_CsvAppend, default=None, help="only import these tables")
+    # FEATURE(import-recovery): default None is the "not explicitly set" sentinel so the import command can apply
+    # precedence (--max-retries > config.toml import_max_retries > built-in 5). 0 disables recovery → exact Go.
+    imp.add_argument("--max-retries", dest="max_retries", type=int, default=None,
+                     help="recovery retries per failed table set (default 5; 0 = disabled, exact Go behavior)")
     imp.add_argument("--companyIds", dest="company_ids", action=_CsvAppend, default=None, help="only these companies")
     imp.add_argument("--locationIds", dest="location_ids", action=_CsvAppend, default=None, help="only these locations")
     imp.add_argument("--api-url", default=None, help=argparse.SUPPRESS)

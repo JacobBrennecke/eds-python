@@ -37,6 +37,17 @@ class AlreadyRunningError(Exception):
     """PARITY: errAlreadyRunning (server.go:53) — HTTP 409 on session start; caller retries every 5s."""
 
 
+class ApiStatusError(RuntimeError):
+    """FEATURE(import-recovery): an API error carrying the HTTP status code so is_recoverable can classify it
+    by the §2.5 matrix (retry 408/429/500/502/503/504; fatal 400/401/403/404/422). ``str()`` is byte-identical
+    to the prior plain RuntimeError message and it stays a RuntimeError, so the --max-retries 0 path is
+    unchanged. See migration/features/import-recovery.md §2.5."""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def _default_transport(method: str, url: str, headers: dict, data: Any = None) -> Any:
     import requests  # lazy (runtime dep)
 
@@ -63,13 +74,16 @@ def get_request_id(resp: Any) -> str:
 
 
 def _parse_error_response(buf: str, status: int, context: str, req_id: str) -> Exception:
-    """PARITY: errorResponse.Parse (import.go:60-73)."""
+    """PARITY: errorResponse.Parse (import.go:60-73).
+
+    FEATURE(import-recovery): returns an ApiStatusError (a RuntimeError subclass) so the status code rides along
+    for is_recoverable; the message text is byte-for-byte identical to the prior RuntimeError."""
     tag = f"(requestId={req_id})" if req_id else ""
     try:
         m = json.loads(buf)
-        return RuntimeError(f"{context}: {m.get('message', '')} {tag}")
+        return ApiStatusError(f"{context}: {m.get('message', '')} {tag}", status)
     except Exception:  # noqa: BLE001
-        return RuntimeError(f"{context}: {buf} (status code={status}) {tag}")
+        return ApiStatusError(f"{context}: {buf} (status code={status}) {tag}", status)
 
 
 def handle_api_error(resp: Any, context: str) -> Exception:
