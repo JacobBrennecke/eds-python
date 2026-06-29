@@ -307,5 +307,58 @@ errors in NewSchemaValidator on a malformed template). `validate` also returns a
 RAISES `SchemaValidationError` on a schema mismatch, instead of Go's 4-tuple `(found, valid, path, err)` with
 `ErrSchemaValidation` — the consumer + importer already consume that raise-based contract.
 
+## Final parity-audit deviations (surfaced by the full Go→Python verification fan-out)
+
+A comprehensive adversarial audit (10 subsystems × find + verify) confirmed the port is FAITHFUL — the byte-spine
+(JSON/float/struct), all SQL generation, NATS subjects + the msgpack/JSON reply split, the consumer flush/skip/ack
+trees, the 3-layer runner exit-code trees, and the HTTP retry policy are parity-exact. One genuine bug was FIXED
+(timeOffset RFC3339 parsing — now uses parse_rfc3339 + rejects naive datetimes, matching Go time.Parse(RFC3339)).
+The remaining audit findings are edge/telemetry/threading/framework divergences, accepted + recorded here:
+
+### heartbeat-stats-int-vs-float
+Go msgpack-encodes the heartbeat's nested SystemStats directly, so integral float64 stats (load1/5/15, usedPercent,
+the counters) pack as msgpack float64. Python builds the heartbeat's `stats` sub-tree via `json.loads(stats.
+__gojson__())`, so an integral float (e.g. `40.0` → JSON `40`) becomes a Python int → msgpack int. The DECODED value
+HQ receives is identical (msgpack int → a Go float64 field decodes fine); only the wire type byte differs, on a
+fire-and-forget telemetry frame. Accepted (not worth restructuring the heartbeat to preserve the float type).
+
+### control-closures-gate-fork-running
+Go's pause/unpause/restart/shutdown notification closures gate on the sticky `configured` bool (set once for the
+process). The Python closures gate on `ctx.fork_running` (a live fork exists). These agree except in the sub-ms
+inter-session window (a fork has exited, the next has not yet started) while configured: there Go attempts the
+loopback (which fails against the dead fork) and a pause/unpause replies Success=false, whereas Python skips it and
+replies Success=true. Deliberate: the loopback only exists while a fork runs, so gating on fork_running avoids a
+guaranteed-failing call; the difference is confined to a negligible timing window.
+
+### worker-thread-no-process-exit
+Go's `shutdown` closure does `logger.Fatal` (→ os.Exit(1)) on a failed loopback, and runImport does `os.Exit(ec)`
+under `--no-restart` — both terminate the whole process immediately, from the notification handler. In Python those
+handlers run on the async notification thread (NotificationRunner), where `sys.exit`/`logger.fatal` only raise
+SystemExit IN that thread and do NOT terminate the process (and `os._exit` would skip all cleanup). So the Python
+shutdown handler logs + returns, and the `--no-restart` import path's `sys.exit(ec)` is best-effort. Deliberate
+threading-model deviation (a worker thread cannot faithfully reproduce Go's process-wide os.Exit).
+
+### cli-parse-errors-exit-3
+Go's cobra `Execute()` returns parse-level errors (unknown flag/command, bad value, wrong positional count) and
+`main` does `os.Exit(1)`. The Python hand-rolled argparse dispatcher's `_Parser.error` exits 3 (EXIT_INCORRECT_USAGE)
+for those — a deliberate cross-port convention (the C# port likewise maps CLI-misuse to its incorrect-usage code).
+Extends `cli-argparse`; the runner's L2 tree handles both exit 3 and exit-1-with-required-flag-text identically, so
+the supervisor behavior is unaffected; only a direct `eds <bad-cli>` shell exit code differs (3 vs 1).
+
+### initconfig-not-global
+Go registers `cobra.OnInitialize(initConfig)`, so config.toml is loaded (and a corrupt one → exit 3) before EVERY
+command. Python calls `init_config` only inside the server path. Effects: with a corrupt config.toml,
+`version`/`publickey`/`download` exit 0 (Python) vs 3 (Go); and a standalone `eds import` after `enroll` (without
+re-passing `--api-key`) does not fall back to the config.toml token the way Go's viper does. The
+notification-driven import always passes `--api-key`, so only the rare standalone-after-enroll path differs.
+Accepted (the config-fallback pattern exists for `server`; extending it to every command is deferred).
+
+### mask-url-urllib
+`util.mask_url` is built on urllib (urlsplit/parse_qs/unquote) rather than the repo's faithful `eds.util.gourl`.
+For normal DB URLs the masked output is identical; for percent-encoded path tails and `;`/malformed-`%` query
+segments the masked bytes differ (the masked `DriverMeta.url` wire field). NOT a secret-leak (userinfo/path/query
+are still masked, just with different masked bytes for exotic inputs). Accepted (reimplementing on gourl is deferred;
+no normal connection string is affected).
+
 <!-- Add further deviations below as they arise (carry over the C# port's where they recur:
      file-uri-windows-drive-letter, download-zip-extract). -->

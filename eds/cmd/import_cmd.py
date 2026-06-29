@@ -25,6 +25,7 @@ from eds.cmd.import_client import (
     is_cancelled,
     load_table_export_info,
     marshal_table_export_info,
+    parse_rfc3339,
     poll_until_complete,
     table_names,
 )
@@ -84,7 +85,11 @@ def run_import_command(args: argparse.Namespace) -> int:
     time_offset_ms: int | None = None
     if args.time_offset:
         try:
-            dt = datetime.fromisoformat(args.time_offset.replace("Z", "+00:00"))
+            # PARITY: Go time.Parse(RFC3339) — accepts arbitrary fractional precision (parse_rfc3339) AND requires
+            # a timezone (reject a naive datetime, which fromisoformat would otherwise accept as local time).
+            dt = parse_rfc3339(args.time_offset)
+            if dt.tzinfo is None:
+                raise ValueError(f"missing timezone in {args.time_offset!r}")
             time_offset_ms = int(dt.timestamp() * 1000)
         except ValueError as e:
             logger.error("error parsing time offset: %s", e)
