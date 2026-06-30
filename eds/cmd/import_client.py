@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from eds.cmd.session import Transport, handle_api_error, set_http_header
 from eds.util.crdb import parse_crdb_export_file
+from eds.util.duration import format_duration
 from eds.util.gojson import marshal
 from eds.util.http import HttpRetry
 from eds.util.logger import Logger
@@ -344,5 +345,5 @@ def bulk_download_data(
     if errors:
         raise RuntimeError(f"error downloading file: {errors[0]}")
 
-    logger.info("Downloaded %d files (%d bytes) in %.1fs", total, total_bytes, time.monotonic() - started)
+    logger.info("Downloaded %d files (%d bytes) in %s", total, total_bytes, format_duration(time.monotonic() - started))
     return tables

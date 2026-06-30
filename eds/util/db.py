@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 from eds.schema import DatabaseSchema
+from eds.util.duration import format_duration
 from eds.util.logger import Logger
 
 
@@ -65,7 +66,7 @@ def build_db_schema_from_info_schema(
         raise ValueError(f"no tables found using {column} = {value}")
     if logger is not None:
         # DEVIATION: Go logs %v of a time.Duration; the duration string format is cosmetic (not byte-tested).
-        logger.info("refreshed %d tables ddl in %v", len(res), _format_duration(time.perf_counter() - start))
+        logger.info("refreshed %d tables ddl in %s", len(res), format_duration(time.perf_counter() - start))
     return res
 
 
@@ -87,11 +88,3 @@ def drop_table(conn: DbConn, table: str) -> None:
     """PARITY: DropTable — DROP TABLE IF EXISTS <table> (table passed already-quoted by the caller; no log)."""
     with conn.cursor() as cur:
         cur.execute("DROP TABLE IF EXISTS " + table)
-
-
-def _format_duration(seconds: float) -> str:
-    if seconds < 1e-3:
-        return f"{seconds * 1e6:.3f}µs"
-    if seconds < 1.0:
-        return f"{seconds * 1e3:.3f}ms"
-    return f"{seconds:.3f}s"

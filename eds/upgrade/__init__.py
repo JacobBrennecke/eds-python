@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from eds.cmd.session import _default_transport
+from eds.util.duration import format_duration
 from eds.util.http import HttpRetry
 from eds.util.logger import Logger
 
@@ -110,7 +111,7 @@ def upgrade(config: UpgradeConfig, *, transport: Any = None) -> None:
             os.remove(tmp)
         except OSError:
             pass
-        config.logger.debug("download took %.3fs", time.monotonic() - started)
+        config.logger.debug("download took %s", format_duration(time.monotonic() - started))
 
 
 def _get(transport: Any, url: str, logger: Logger) -> bytes:
