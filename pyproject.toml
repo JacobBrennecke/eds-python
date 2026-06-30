@@ -23,6 +23,20 @@ dependencies = [
 # pytest-asyncio: asyncio_mode="auto" + filterwarnings=error means a clean install can't even COLLECT the
 # async tests without it (the asyncio_* ini options raise an unknown-config error otherwise).
 dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+# e2e infra (Docker-gated suites): testcontainers with the per-backend extras + the SQL sink driver libs the
+# eds drivers lazy-import. `pip install -e ".[e2e]"` makes the Docker-gated e2e suites RUN (they skip cleanly
+# without these — see the `pytest.importorskip` guards in tests/test_*_e2e.py); needs a running Docker daemon.
+# Includes pytest so `.[e2e]` is self-sufficient.
+e2e = [
+    "pytest",
+    "pytest-asyncio",
+    "testcontainers[kafka,postgres,mysql,mssql]",  # postgres/mysql/sqlserver/kafka containers (s3 uses core/MinIO)
+    "psycopg[binary]",             # postgres sink (eds imports `psycopg` v3)
+    "pymysql",                     # mysql sink
+    "pymssql",                     # sqlserver sink
+    "snowflake-connector-python",  # snowflake sink (provides `snowflake.connector`)
+    "cryptography",                # snowflake key-pair auth (driver imports it directly)
+]
 
 [project.scripts]
 eds = "eds.__main__:main"

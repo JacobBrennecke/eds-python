@@ -8,12 +8,14 @@ it needs only testcontainers + boto3 (no extra `minio` package).
 
 from __future__ import annotations
 
-import importlib.util
 import shutil
 import subprocess
 import time
 
 import pytest
+
+pytest.importorskip("testcontainers.core.container")
+pytest.importorskip("boto3")
 
 
 def _docker_up() -> bool:
@@ -25,16 +27,8 @@ def _docker_up() -> bool:
         return False
 
 
-def _deps_available() -> bool:
-    return (
-        importlib.util.find_spec("boto3") is not None
-        and importlib.util.find_spec("testcontainers.core.container") is not None
-    )
-
-
 pytestmark = [
     pytest.mark.skipif(not _docker_up(), reason="Docker not available"),
-    pytest.mark.skipif(not _deps_available(), reason="boto3 / testcontainers not installed"),
     pytest.mark.filterwarnings("ignore::DeprecationWarning"),  # testcontainers internal deprecations
 ]
 

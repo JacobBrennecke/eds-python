@@ -240,6 +240,9 @@ def test_is_recoverable_http_status(status, expected) -> None:
     [  # §1c.4 canonical substring set (covers requests-style messages that arrive as plain text)
         "connection reset by peer", "connection refused", "read timed out", "broken pipe",
         "unexpected EOF", "no such host", "tls handshake timeout", "dns lookup failed",
+        # §1c.4 DNS / name-resolution phrasings (the real outage shape the live test surfaced)
+        "Failed to resolve 'host' ([Errno 11001] getaddrinfo failed)",
+        "Temporary failure in name resolution", "Name or service not known",
     ],
 )
 def test_is_recoverable_transport_messages(msg) -> None:
@@ -265,6 +268,21 @@ def test_is_recoverable_types_and_fatals() -> None:
     assert is_recoverable(RecoveryCancelled()) is False
     assert is_recoverable(SchemaValidationError("schema decode")) is False
     assert is_recoverable(RuntimeError("totally unknown internal bug")) is False  # unknown ⇒ fatal
+
+
+def test_is_recoverable_requests_connection_error_dns_regression() -> None:
+    """Regression (live-test catch): a real network outage surfaces as requests.exceptions.ConnectionError wrapping
+    urllib3's NameResolutionError — which is NOT a builtin ConnectionError (it subclasses OSError, errno=None). It
+    must be recoverable by TYPE regardless of the message phrasing, so import recovery actually engages."""
+    import requests
+
+    dns_err = requests.exceptions.ConnectionError(
+        "HTTPSConnectionPool(host='sandbox-api.shopmonkey.cloud', port=443): Max retries exceeded with url: "
+        "/v3/export/bulk/X (Caused by NameResolutionError(\"<...>: Failed to resolve "
+        "'sandbox-api.shopmonkey.cloud' ([Errno 11001] getaddrinfo failed)\"))"
+    )
+    assert is_recoverable(dns_err) is True
+    assert is_recoverable(requests.exceptions.Timeout("read timed out")) is True
 
 
 def test_failed_tables_returns_full_set_in_order() -> None:
@@ -786,3 +804,190 @@ def test_e2e_recovery_lands_table_in_postgres(tmp_path, monkeypatch) -> None:
         with psycopg.connect(get_connection_string_from_url(url)) as conn:
             rows = conn.execute('SELECT "id","companyId" FROM "customer" ORDER BY "id"').fetchall()
         assert rows == [("c1", "comp1"), ("c2", None)]
+
+
+# ---- FEATURE(import-log-verbosity): default once-per-batch vs --verbose per-table detail -----------
+# Cross-port oracle = migration/features/import-log-verbosity.md. The DEFAULT (INFO) set matches the Go
+# oracle (once per export batch); --verbose (DEBUG) adds an IDENTICAL Python↔C# per-table detail layer with
+# CORRECT PER-TABLE counts (that table's files/records — NOT the all-files batch total).
+
+# Two CRDB export files that sort customer-before-order (directory order is sorted-filename order).
+_GZ_CUSTOMER = "202407242003015854988560000000000-abc-def-customer-2.ndjson.gz"
+_GZ_ORDER = "202407242003015854988560000000000-abc-def-order-2.ndjson.gz"
+_CUSTOMER_ROWS = '{"id":"c1","companyId":"comp1"}\n{"id":"c2"}\n'  # 2 records
+_ORDER_ROWS = '{"id":"o1"}\n{"id":"o2"}\n{"id":"o3"}\n'            # 3 records
+
+
+class _RecLogger:
+    """Capturing logger: records (LEVEL, formatted message) at all levels (formatted exactly like ConsoleLogger,
+    minus the envelope) so a test can assert the message text + level the recovery loop emits."""
+
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str]] = []
+
+    def _rec(self, lvl: str, fmt: str, args: tuple) -> None:
+        from eds.util.logger import _format
+
+        self.records.append((lvl, _format(fmt, args)))
+
+    def trace(self, m, *a): self._rec("TRACE", m, a)
+    def debug(self, m, *a): self._rec("DEBUG", m, a)
+    def info(self, m, *a): self._rec("INFO", m, a)
+    def warn(self, m, *a): self._rec("WARN", m, a)
+    def error(self, m, *a): self._rec("ERROR", m, a)
+    def fatal(self, m, *a): self._rec("ERROR", m, a)
+    def with_prefix(self, p): return self
+    def with_fields(self, f): return self
+
+    def msgs(self) -> list[str]:
+        return [m for _, m in self.records]
+
+
+def _order_schema():
+    from eds.schema import Schema, SchemaProperty
+
+    return Schema(
+        table="order", model_version="v1", primary_keys=["id"],
+        properties={"id": SchemaProperty(type="string")},
+    )
+
+
+def _wire_two_table_fakes(monkeypatch, *, completed=None) -> dict:
+    """A 2-table (customer:2 rows, order:3 rows) fake export/poll/download against the real file driver +
+    real importer with NO network. `completed` overrides the per-table poll status map."""
+    import eds.cmd.import_cmd as ic
+
+    statuses = completed or {"customer": "Completed", "order": "Completed"}
+    rows = {"customer": (_GZ_CUSTOMER, _CUSTOMER_ROWS), "order": (_GZ_ORDER, _ORDER_ROWS)}
+    state = {"polls": 0, "downloads": 0, "exports": 0}
+
+    def fake_create_export_job(*a, **k):
+        state["exports"] += 1
+        return f"job-{state['exports']}"
+
+    def fake_poll(*a, **k):
+        state["polls"] += 1
+        return _job(statuses)
+
+    def fake_bulk_download(logger, data, directory, **k):
+        from eds.cmd.import_client import TableExportInfo
+
+        state["downloads"] += 1
+        for t in data.keys():
+            name, content = rows[t]
+            with gzip.open(f"{directory}/{name}", "wt", encoding="utf-8") as f:
+                f.write(content)
+        return [TableExportInfo(table=t) for t in data.keys()]
+
+    monkeypatch.setattr(ic, "create_export_job", fake_create_export_job)
+    monkeypatch.setattr(ic, "poll_until_complete", fake_poll)
+    monkeypatch.setattr(ic, "bulk_download_data", fake_bulk_download)
+    monkeypatch.setattr(
+        ic, "new_api_registry",
+        lambda *a, **k: _FakeRegistry({"customer": _customer_schema(), "order": _order_schema()}),
+    )
+    return state
+
+
+def _two_table_argv(tmp_path, *, verbose: bool) -> list[str]:
+    out = str(tmp_path / "out")
+    argv = [
+        "import", "--url", "file://" + out.replace("\\", "/"), "--api-key", "k",
+        "--api-url", "http://localhost", "--no-confirm", "--data-dir", str(tmp_path / "data"),
+        "--max-retries", "5", "--only", "customer,order",
+    ]
+    if verbose:
+        argv.insert(1, "--verbose")  # base flag, accepted on the import subparser
+    return argv
+
+
+def test_import_log_default_is_once_per_batch_no_per_table_detail(tmp_path, monkeypatch, capsys) -> None:
+    # DEFAULT (no --verbose): exactly the Go once-per-batch INFO set, with batch totals + restored seconds, and
+    # the #6/#7 DEBUG per-table/per-file lines ABSENT (regression guard: NOT once-per-table like C# drifted to).
+    from eds.cmd.root import main
+
+    _wire_two_table_fakes(monkeypatch)
+    rc = main(_two_table_argv(tmp_path, verbose=False))
+    assert rc == EXIT_SUCCESS
+    err = capsys.readouterr().err
+
+    # #1 the table list logged ONCE, comma-joined (not once per table)
+    assert err.count("Importing data to tables customer, order") == 1
+    # #2 the batch summary logged ONCE with the all-files totals (2 customer + 3 order = 5 records, 2 files)
+    assert err.count("imported 5 records from 2 files in ") == 1
+    # #3 the terminal line carries the restored elapsed duration in the compact format_duration form (matching Go's
+    # %v-on-Duration + the C# twin + Python's other import lines — NOT the old %.1fs).
+    import re as _re
+
+    assert _re.search(r"👋 Loaded 2 tables in \d+\.\d+(µs|ms|s)", err)
+    # #6 verbose per-table detail must be ABSENT at default level
+    assert "importing table" not in err
+    assert "records from 1 files for table" not in err
+    # #7 per-file DEBUG detail must be ABSENT at default level
+    assert "processing file:" not in err
+
+
+def test_import_log_verbose_adds_per_table_detail_with_per_table_counts(tmp_path, monkeypatch, capsys) -> None:
+    # --verbose: everything above PLUS the per-table detail layer, with PER-TABLE counts (customer=2/1,
+    # order=3/1) — NOT the all-files batch total — emitted in directory order (customer before order).
+    from eds.cmd.root import main
+
+    _wire_two_table_fakes(monkeypatch)
+    rc = main(_two_table_argv(tmp_path, verbose=True))
+    assert rc == EXIT_SUCCESS
+    err = capsys.readouterr().err
+
+    # #6 per-table detail (DEBUG) — exact PER-TABLE counts
+    assert err.count("importing table customer") == 1
+    assert err.count("importing table order") == 1
+    assert err.count("imported 2 records from 1 files for table customer in ") == 1
+    assert err.count("imported 3 records from 1 files for table order in ") == 1
+    # the all-files batch summary still fires ONCE (decoupled from the per-table layer)
+    assert err.count("imported 5 records from 2 files in ") == 1
+    # ordering: customer's per-table lines precede order's (directory/sorted order)
+    assert err.index("importing table customer") < err.index("importing table order")
+    # #7 per-file DEBUG detail is present at --verbose
+    assert "processing file:" in err
+
+
+def test_recovery_only_wording_matches_contract() -> None:
+    # §5 recovery-only lines (no Go oracle; must match the C# twin word-for-word): INFO recovering / WARN giving up.
+    log = _RecLogger()
+    run_with_recovery(
+        log, plan=ImportPlan(run_id="r"), max_retries=5,
+        initial_export_tables=["a", "b"], initial_job_id="job-0",
+        export_fn=lambda t, p: "job",
+        poll_fn=lambda jid: _job({"a": "Failed", "b": "Failed"}),
+        download_fn=lambda *a: (_ for _ in ()).throw(AssertionError("no ready tables")),
+        import_fn=lambda *a: None, sleep=lambda s: None,
+    )
+    assert ("INFO", "recovering: retrying a, b in 30s (attempt 1/5)") in log.records
+    assert ("WARN", "giving up on tables a, b after 5 retries") in log.records
+    # the old wording must be gone (locks the cross-port rename)
+    assert not any("retrying tables" in m for m in log.msgs())
+    assert not any(m.startswith("giving up on tables") and m.endswith("retries:") for m in log.msgs())
+    assert not any("after 5 retries:" in m for m in log.msgs())
+
+
+def test_resuming_wording_matches_contract(tmp_path, monkeypatch, capsys) -> None:
+    # §5 cross-restart line: INFO "resuming import: skipping already-completed tables <tables>". Pre-seed a
+    # progress marker for 'order' so only 'customer' resumes — also guards cross-restart resume (no regression).
+    from eds.cmd.import_cmd import compute_run_id
+    from eds.cmd.root import main
+    from eds.tracker import new_tracker
+
+    url = "file://" + str(tmp_path / "out").replace("\\", "/")
+    run_id = compute_run_id(url, ["customer", "order"], [], [], None)
+    data_dir = str(tmp_path / "data")
+    import os as _os
+
+    _os.makedirs(data_dir, exist_ok=True)
+    tr = new_tracker(data_dir)
+    tr.set_key(f"import-progress:{run_id}:order", "1")  # 'order' already completed on a prior run
+    tr.close()
+
+    _wire_two_table_fakes(monkeypatch, completed={"customer": "Completed"})  # only the incomplete table returns
+    rc = main(_two_table_argv(tmp_path, verbose=False))
+    assert rc == EXIT_SUCCESS
+    err = capsys.readouterr().err
+    assert "resuming import: skipping already-completed tables order" in err

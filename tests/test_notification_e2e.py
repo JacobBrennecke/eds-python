@@ -9,6 +9,8 @@ import subprocess
 
 import pytest
 
+pytest.importorskip("testcontainers.core.container")
+
 
 def _docker_up() -> bool:
     if shutil.which("docker") is None:
