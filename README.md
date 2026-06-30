@@ -78,6 +78,16 @@ This command will import data from the Shopmonkey Database into PostgreSQL datab
 
 The import command will ensure that you have a valid EDS session before running an import. It will ensure that any data that is processed during the import processed will automatically be skipped when the server is started after the import to ensure duplicates aren't processed.
 
+### URL and API key from config.toml
+
+When `--url` and `--api-key` are not passed on the command line, the import command reads them from the `config.toml` in your data directory — so once a server has been enrolled and configured, you can run import with neither flag:
+
+```
+eds import
+```
+
+Resolution precedence is: an explicit `--url`/`--api-key` flag wins; for the API key the `SM_APIKEY` environment variable is tried next; otherwise the values come from `config.toml` (the `url` and `token` keys — the same ones the server uses). If a value is found in none of these, the import exits with an error requesting it. These values are read silently and are never written to the logs.
+
 ### Automatic Recovery
 
 If an import run hits a recoverable error — a network or transport failure, a timeout, an HTTP `5xx`/`429`, or a failed table export — it automatically recovers: it detects which table(s) failed, re-exports and re-imports just those tables (re-downloading the existing export job while its URLs are still valid, otherwise starting a fresh export of the failed tables), and continues. Retries use exponential backoff over five attempts — `30s, 60s, 120s, 240s, 480s`. Per-table progress is recorded, so a restarted import resumes only the tables that had not finished. If a table still cannot be imported after all retries, the error is logged and that table is recorded as failed, but the remaining tables are still imported so the server can start and begin processing real-time data (the failed tables can be retried later). Recovery is controlled by `--max-retries` (default `5`; `0` disables it).

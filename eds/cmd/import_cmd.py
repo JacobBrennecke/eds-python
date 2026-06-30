@@ -336,13 +336,23 @@ def run_import_command(args: argparse.Namespace) -> int:
     logger = _root.new_logger(args).with_prefix("[import]")
     register_all()
 
-    driver_url = args.url
-    api_key = args.api_key
+    data_dir = _root.get_data_dir(args, logger)
+    # FEATURE(import-config-fallback): fall back to config.toml for --url ("url") and --api-key ("token") when not
+    # supplied on the CLI/env, mirroring the SERVER command's resolution (server.py:199-200). Net precedence:
+    # flag > $SM_APIKEY env (the --api-key default) > config "token". Intentional divergence from Go (Go's import
+    # REQUIRES both flags). The config read is SILENT — the resolved url/api-key are secrets and are NEVER logged.
+    # See migration/features/import-config-fallback.md.
+    config = load_config(data_dir)
+    driver_url = args.url or config.get_string("url")
+    api_key = args.api_key or config.get_string("token")
     if not driver_url:
-        print('error: required flag "url" not set', file=sys.stderr)
+        # FEATURE(import-config-fallback): config.toml ("url") is now an accepted source for the still-empty case.
+        print('error: required flag "url" not set (provide --url or set "url" in config.toml)', file=sys.stderr)
         return EXIT_INCORRECT_USAGE
     if not api_key:
-        print('error: required flag "api-key" not set', file=sys.stderr)
+        # FEATURE(import-config-fallback): config.toml ("token") is now an accepted source for the still-empty case.
+        print('error: required flag "api-key" not set (provide --api-key or set "token" in config.toml)',
+              file=sys.stderr)
         return EXIT_INCORRECT_USAGE
 
     time_offset_ms: int | None = None
@@ -358,7 +368,6 @@ def run_import_command(args: argparse.Namespace) -> int:
             logger.error("error parsing time offset: %s", e)
             return EXIT_ERROR
 
-    data_dir = _root.get_data_dir(args, logger)
     if args.dry_run:
         logger.info("🚨 Dry run enabled")
     started = time.monotonic()
