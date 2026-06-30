@@ -112,13 +112,20 @@ byte-for-byte. Where §2's older prose says "same job_id resumes per-table curso
 3. **Empty-scope fallback (Python HIGH).** When there are NO per-table markers AND no `--only`, a recoverable
    failure's candidate set is the FULL table set — NEVER `[]`. A recoverable failure must NEVER collapse to
    "0 tables → EXIT_SUCCESS". (C# already correct via empty-scope→full re-export.)
-4. **Retryable classification (canonical, identical both ports).** Retry by EXCEPTION TYPE first (connection
-   reset/refused, socket errors, read/write timeout, HTTP transport) + HTTP `408/429/500/502/503/504` + export
-   `Failed` + download HTTP/network IO. FATAL (no retry): malformed URL → exit 3; `PermissionError`, disk-full
-   (ENOSPC), other non-network local OSErrors; `401/403/400/404/422`; schema/config; cancellation. Shared substring
-   fallback set: `connection reset | connection refused | broken pipe | timed out | EOF | no such host | tls
-   handshake | dns`. (FIX Python: stop treating ALL OSError as retryable. FIX C#: align the substring set; don't
-   blanket-retry `IOException` for local disk errors.)
+4. **Retryable classification (canonical, identical both ports).** Classify by EXCEPTION TYPE FIRST — and the
+   HTTP-client's own connection/timeout types count as transport regardless of message: **Python**
+   `requests.exceptions.ConnectionError` + `requests.exceptions.Timeout` (these are NOT builtin `ConnectionError`
+   — they subclass `OSError` with `errno=None`, so they MUST be matched by type); **C#** `HttpRequestException` +
+   `SocketException` (recoverable socket codes) via an inner-exception-chain walk. Plus builtin
+   `ConnectionError`/`TimeoutError`, HTTP `408/429/500/502/503/504`, export `Failed`, download HTTP/network IO.
+   FATAL (no retry): malformed URL → exit 3; `PermissionError`/`UnauthorizedAccessException`, disk-full (ENOSPC),
+   other non-network local OSErrors; `401/403/400/404/422`; schema/config; cancellation; unknown → fatal.
+   Shared substring fallback set (last resort, identical both ports): `connection reset | connection refused |
+   broken pipe | timed out | EOF | no such host | tls handshake | dns | failed to resolve | getaddrinfo | name
+   resolution | name or service not known`. **DNS-regression (live-test catch):** a real outage arrives as a
+   `requests.ConnectionError`/`HttpRequestException` wrapping a name-resolution failure whose message is
+   `"Failed to resolve … getaddrinfo failed"` — the bare `dns`/`no such host` tokens do NOT match it, so the TYPE
+   check is load-bearing; the added DNS phrasings are the belt-and-suspenders fallback.
 5. **`--no-delete` / audit-mode → NO re-truncate.** When `--no-delete` is set (or the destination is audit/append
    mode), do NOT re-truncate the retried table on retry — it would drop the audit trail / prior data. Accept the
    at-least-once re-append (PK-safe for the single in-flight table). (Python IR-RECALL-02; force-truncate REJECTED.)

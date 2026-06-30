@@ -55,6 +55,7 @@ from eds.schema import SchemaValidationError
 from eds.tracker import new_tracker
 from eds.util.api import get_api_url_from_jwt
 from eds.util.crdb import parse_crdb_export_file
+from eds.util.duration import format_duration
 from eds.util.file import list_dir
 from eds.util.hash import hash as eds_hash
 from eds.util.logger import Logger
@@ -70,6 +71,9 @@ _RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})  # §1c.4 transien
 _TRANSPORT_MARKERS = (
     "connection reset", "connection refused", "broken pipe", "timed out", "eof",
     "no such host", "tls handshake", "dns",
+    # §1c.4 DNS / name-resolution phrasings (Windows getaddrinfo, Linux resolver, urllib3 NameResolutionError) —
+    # a real outage surfaces as one of these, not the bare "dns"/"no such host" tokens above.
+    "failed to resolve", "getaddrinfo", "name resolution", "name or service not known",
 )
 # §1c.4 local (non-network) OSError errnos that are FATAL — disk full, permissions, read-only fs, quota.
 _FATAL_ERRNOS = frozenset(
@@ -103,6 +107,16 @@ def is_recoverable(err: BaseException) -> bool:
         return err.status_code in _RETRYABLE_STATUS
     if isinstance(err, (ConnectionError, TimeoutError)):
         return True  # builtin network types (reset/refused/aborted/broken-pipe, socket timeout)
+    # FEATURE(import-recovery): requests' network errors are NOT builtin ConnectionError (they subclass OSError via
+    # IOError, errno=None), so classify them by TYPE — a requests ConnectionError/Timeout is ALWAYS a transport/
+    # network failure (incl. DNS NameResolutionError) and must recover regardless of message phrasing (§1c.4).
+    try:
+        import requests  # hard dependency, used by the import HTTP path; lazy here to keep is_recoverable importable
+
+        if isinstance(err, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+            return True
+    except ImportError:  # pragma: no cover - requests is always installed at runtime
+        pass
     if isinstance(err, OSError):
         # A genuinely LOCAL OSError (disk-full / ENOENT / ...) is fatal; requests' network errors subclass OSError
         # (not builtin ConnectionError), so route them by the canonical transport substrings.
@@ -270,8 +284,8 @@ def run_with_recovery(  # noqa: C901 — the single recovery state machine (expo
         if is_cancelled(cancel):
             raise RecoveryCancelled()
         logger.error("error running import: %s", last_error)  # §2.2 step 1 — log as today
-        logger.info(
-            "recovering: retrying tables %s in %ds (retry %d/%d)",
+        logger.info(  # PARITY(import-log-verbosity §5): cross-port wording (matches the C# twin word-for-word)
+            "recovering: retrying %s in %ds (attempt %d/%d)",
             ", ".join(working or export_tables) or "(all)", ladder[attempt - 1], attempt, max_retries,
         )
         sleep(ladder[attempt - 1])
@@ -285,9 +299,10 @@ def run_with_recovery(  # noqa: C901 — the single recovery state machine (expo
     else:
         permanently_failed = []
     if permanently_failed:
-        logger.error(
-            "giving up on tables %s after %d retries: %s",
-            ", ".join(permanently_failed), max_retries, last_error,
+        # PARITY(import-log-verbosity §5): WARN + cross-port wording (matches the C# twin); precedes the
+        # soft-exhaustion exit 1. The per-retry `error running import: <err>` already logged last_error.
+        logger.warn(
+            "giving up on tables %s after %d retries", ", ".join(permanently_failed), max_retries
         )
     return RecoveryResult(
         imported=imported, permanently_failed=permanently_failed, table_export_info=info_all,
@@ -437,7 +452,8 @@ def _do_import(  # noqa: C901 — faithful to importCmd.Run's single body
     if max_retries > 0 and not dir_ and not args.schema_only:
         return _do_import_with_recovery(
             args, logger, tracker, registry, data_dir, cancel, api_url, api_key, driver_url,
-            time_offset_ms, validator, importer, driver, only, company_ids, location_ids, max_retries, version,
+            time_offset_ms, validator, importer, driver, only, company_ids, location_ids, max_retries,
+            version, started,
         )
 
     success = False
@@ -506,7 +522,9 @@ def _do_import(  # noqa: C901 — faithful to importCmd.Run's single body
             logger.trace("driver does not support migration, skip setting table versions")
 
         success = True
-        logger.info("👋 Loaded %d tables in %.1fs", len(tables), time.monotonic() - started)
+        # PARITY: Go import.go:695 renders %v on a time.Duration (compact). Use the shared format_duration so the
+        # terminal matches Go + the C# twin + Python's own per-file/per-table import lines (was %.1fs).
+        logger.info("👋 Loaded %d tables in %s", len(tables), format_duration(time.monotonic() - started))
         return EXIT_SUCCESS
     except Exception as e:  # noqa: BLE001 — PARITY: all run-body failures are Fatal/Error → exit 1 (not panic)
         logger.error("import failed: %s", e)
@@ -528,6 +546,7 @@ def _do_import(  # noqa: C901 — faithful to importCmd.Run's single body
 def _do_import_with_recovery(  # noqa: C901 — the recovery wiring (build stages + run_with_recovery + summary)
     args, logger, tracker, registry, data_dir, cancel, api_url, api_key, driver_url,
     time_offset_ms, validator, importer, driver, only, company_ids, location_ids, max_retries, version,
+    started,
 ) -> int:
     """FEATURE(import-recovery): the fresh-export full-import path with recovery (§1b/§2). Builds the real
     export/poll/download/import stages, threads the captured plan (companyIds/timeOffset) + a stable run id into
@@ -547,7 +566,9 @@ def _do_import_with_recovery(  # noqa: C901 — the recovery wiring (build stage
     candidate = list(only) if only else list(latest.keys())
     completed = {t for t in candidate if _progress_marker_present(tracker, run_id, t)}
     if completed:
-        logger.info("resuming import; %d tables already completed: %s", len(completed), ", ".join(sorted(completed)))
+        logger.info(  # PARITY(import-log-verbosity §5): cross-port wording (matches the C# twin word-for-word)
+            "resuming import: skipping already-completed tables %s", ", ".join(sorted(completed))
+        )
     # A fresh run POSTs the original `only` (empty ⇒ all, via omitempty); a resume POSTs only the incomplete set.
     initial_export_tables = [t for t in candidate if t not in completed] if completed else list(only)
 
@@ -657,5 +678,7 @@ def _do_import_with_recovery(  # noqa: C901 — the recovery wiring (build stage
     # whole-run success → reset the progress markers + any prior failed record (§2.4).
     tracker.delete_keys_with_prefix(f"import-progress:{run_id}:")
     tracker.delete_key(f"import-failed:{run_id}")
-    logger.info("👋 Loaded %d tables", len(result.imported))
+    # PARITY: restore the elapsed duration the legacy path / Go (import.go:695, %v on a time.Duration → compact)
+    # always print on the terminal line; format_duration matches Go + the C# twin + Python's other import lines.
+    logger.info("👋 Loaded %d tables in %s", len(result.imported), format_duration(time.monotonic() - started))
     return EXIT_SUCCESS

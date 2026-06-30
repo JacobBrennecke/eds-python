@@ -15,6 +15,7 @@ from eds.dbchange import DBChangeEvent
 from eds.driver import ImporterConfig
 from eds.schema import Schema, SchemaMap, SchemaValidationError
 from eds.util.crdb import parse_crdb_export_file
+from eds.util.duration import format_duration
 from eds.util.file import list_dir
 from eds.util.gojson import RawJson, stringify
 from eds.util.hash import hash as eds_hash
@@ -38,15 +39,6 @@ class ImportFlusher(Protocol):
     byte-batch flush; handlers without it fall back to the single end-of-run flush + end-of-run markers."""
 
     def flush_imported(self) -> None: ...
-
-
-def _dur(seconds: float) -> str:
-    # DEVIATION (duration-format): log-only, not byte-checked; Go renders time.Duration.String().
-    if seconds < 1e-3:
-        return f"{seconds * 1e6:.3f}µs"
-    if seconds < 1.0:
-        return f"{seconds * 1e3:.3f}ms"
-    return f"{seconds:.3f}s"
 
 
 def run(logger: Logger, config: ImporterConfig, handler: Handler) -> None:
@@ -147,7 +139,7 @@ def run(logger: Logger, config: ImporterConfig, handler: Handler) -> None:
         finally:
             dec.close()
 
-        logger.debug("imported %d %s records in %s", count, table, _dur(time.monotonic() - tstarted))
+        logger.debug("imported %d %s records in %s", count, table, format_duration(time.monotonic() - tstarted))
         return count
 
     if config.recovery_enabled:
@@ -164,7 +156,9 @@ def run(logger: Logger, config: ImporterConfig, handler: Handler) -> None:
             total += process_file(file, table, unix_nano)
         handler.import_completed()
 
-    logger.info("imported %d records from %d files in %s", total, len(files), _dur(time.monotonic() - started))
+    logger.info(
+        "imported %d records from %d files in %s", total, len(files), format_duration(time.monotonic() - started)
+    )
 
 
 def _write_progress_marker(config: ImporterConfig, table: str) -> None:
@@ -174,7 +168,17 @@ def _write_progress_marker(config: ImporterConfig, table: str) -> None:
 
 
 def _run_recovery(logger: Logger, config: ImporterConfig, handler: Handler, files, process_file) -> int:
-    """FEATURE(import-recovery): table-grouped replay with a per-table flush boundary + completion markers."""
+    """FEATURE(import-recovery): table-grouped replay with a per-table flush boundary + completion markers.
+
+    PARITY(import-log-verbosity): replay tables in the order their files first appear in the (sorted) directory
+    listing — Go's single-pass directory order — so the per-file/per-table verbose lines come out in the same
+    order across ports; any configured table that exported NO files is still flushed + marked afterwards, so the
+    recovery completion-marker invariant (and cross-restart resume) is unchanged.
+
+    FEATURE(import-log-verbosity): each table emits a verbose-only DEBUG detail pair (``importing table <t>`` /
+    ``imported <r> records from <f> files for table <t> in <dur>``) with PER-TABLE counts (that table's
+    files/records, NOT the all-files batch total). No Go oracle — identical Python↔C# by design (more
+    troubleshooting data). See migration/features/import-log-verbosity.md."""
     files_by_table: dict[str, list[tuple[str, int]]] = {}
     for file in files:
         table, unix_nano, ok = parse_crdb_export_file(file)
@@ -185,12 +189,28 @@ def _run_recovery(logger: Logger, config: ImporterConfig, handler: Handler, file
             continue
         files_by_table.setdefault(table, []).append((file, unix_nano))
 
+    # dict insertion order == directory (sorted) order; the zero-file configured tables follow so each still
+    # gets a flush + completion marker (the recovery invariant is unchanged — only the replay ORDER aligns).
+    ordered_tables = list(files_by_table.keys())
+    ordered_tables += [t for t in config.tables if t not in files_by_table]
+
     flusher = handler if isinstance(handler, ImportFlusher) else None
     total = 0
     processed: list[str] = []
-    for table in config.tables:  # deterministic order
-        for file, unix_nano in files_by_table.get(table, []):
-            total += process_file(file, table, unix_nano)
+    for table in ordered_tables:
+        table_files = files_by_table.get(table, [])
+        # FEATURE(import-log-verbosity): verbose-only per-table detail (DEBUG; gated by --verbose).
+        logger.debug("importing table %s", table)
+        t_started = time.monotonic()
+        t_total = 0
+        for file, unix_nano in table_files:
+            t_total += process_file(file, table, unix_nano)
+        total += t_total
+        # FEATURE(import-log-verbosity): PER-TABLE counts (this table's files/records), NOT the batch total.
+        logger.debug(
+            "imported %d records from %d files for table %s in %s",
+            t_total, len(table_files), table, format_duration(time.monotonic() - t_started),
+        )
         if flusher is not None:
             flusher.flush_imported()  # durable per-table flush BEFORE the marker
             _write_progress_marker(config, table)

@@ -460,5 +460,32 @@ what landed in this port (all tagged `# FEATURE(import-recovery):`):
   `set_config_value`, like `--mode`).
 - Tests: `tests/test_import_recovery.py`.
 
+### import-log-verbosity
+**This is a FEATURE, not a deferral.** Verbose-only per-table import detail; NO Go oracle — IDENTICAL Python↔C#;
+intentional (more troubleshooting data). The cross-port oracle is `migration/features/import-log-verbosity.md`
+(byte-identical in both repos). `eds import` emits the SAME log MESSAGES (text + level + emit-timing) at BOTH
+levels:
+- DEFAULT (no `--verbose`): the Go once-per-batch shape — INFO `Importing data to tables <joined>` once, INFO
+  `imported <R> records from <F> files in <dur>` once (batch totals), terminal INFO `👋 Loaded <N> tables in
+  <dur>` (the recovery path's dropped seconds are restored to match the legacy path + Go). Tagged `# PARITY:`.
+- `--verbose` (DEBUG): the above PLUS a per-table detail layer (`# FEATURE(import-log-verbosity):`) emitted in
+  `eds/importer/__init__.py` `_run_recovery` — per table, DEBUG `importing table <t>` then DEBUG `imported <r>
+  records from <f> files for table <t> in <dur>` with PER-TABLE counts (that table's files/records, NOT the
+  all-files batch total).
+- Recovery-only lines (`# PARITY(import-log-verbosity §5):`, no Go oracle, aligned to the C# twin word-for-word):
+  INFO `recovering: retrying <tables> in <delay>s (attempt <n>/<max>)`, WARN `giving up on tables <tables> after
+  <max> retries` (precedes soft-exhaustion exit 1), INFO `resuming import: skipping already-completed tables
+  <tables>` (cross-restart).
+- ORDERING DEVIATION (recovery path): `_run_recovery` replays tables in the order their files first appear in the
+  sorted directory listing, then any zero-file configured table (so every table still gets a flush + completion
+  marker). This is table-GROUPED, not Go's pure single-pass interleaved directory order — pure directory order is
+  incompatible with the per-table flush boundary required for crash recovery. Identical Python↔C# (both keep the
+  per-table flush). Recovery behavior (markers / cross-restart resume / soft-exhaustion exit 1) is UNCHANGED.
+- The verbose layer is added only on the recovery (default `eds import`) path; the `--max-retries 0` / `--dir`
+  legacy single-pass path stays exact-Go.
+- Tests: `tests/test_import_recovery.py` (`test_import_log_default_is_once_per_batch_no_per_table_detail`,
+  `test_import_log_verbose_adds_per_table_detail_with_per_table_counts`, `test_recovery_only_wording_matches_contract`,
+  `test_resuming_wording_matches_contract`).
+
 <!-- Add further deviations below as they arise (carry over the C# port's where they recur:
      file-uri-windows-drive-letter, download-zip-extract). -->
