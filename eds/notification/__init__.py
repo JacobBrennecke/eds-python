@@ -94,8 +94,10 @@ class NotificationConsumer:
 
     async def stop(self) -> None:
         if self._sub is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await self._sub.unsubscribe()
+            except Exception as e:  # noqa: BLE001 — PARITY: notification.go:177
+                self._logger.error("failed to unsubscribe from nats: %s", e)
             self._sub = None
         if self._nc is not None:
             with contextlib.suppress(Exception):

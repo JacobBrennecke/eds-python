@@ -217,20 +217,24 @@ async def _run_fork_async(args: argparse.Namespace) -> int:  # noqa: C901 — fa
                 cmd = control_task.result()
                 control_task = asyncio.ensure_future(control.get())
                 if cmd == "restart":
+                    logger.debug("restarting consumer")  # PARITY: fork.go:233
                     exit_code = EXIT_RESTART
                     completed = True
                     if consumer is not None:
                         await consumer.stop()
                         consumer = None
                 elif cmd == "ctl_shutdown":
+                    logger.debug("shutting down")  # PARITY: fork.go:237
                     completed = True
                     if consumer is not None:
                         await consumer.stop()
                         consumer = None
                 elif cmd == "pause" and consumer is not None:
+                    logger.debug("pausing")  # PARITY: fork.go:248
                     await consumer.pause()
                     paused = True
                 elif cmd == "unpause" and consumer is not None:
+                    logger.debug("unpausing")  # PARITY: fork.go:253
                     await consumer.unpause()
                     paused = False
             elif fatal_t is not None and fatal_t in done:

@@ -169,6 +169,11 @@ class Consumer:
             disconnected_cb=_disconnected_cb, closed_cb=_closed_cb, reconnected_cb=_reconnected_cb,
         )
         self._session_id = info.session_id
+        # PARITY: consumer.go:771 — log the resolved credential info at startup (always fires).
+        self._logger.info(
+            "using info from credentials, server: %s companies: %s, session: %s",
+            info.server_id, info.company_ids, info.session_id,
+        )
         # PARITY: company-id overrides are validated strictly against the credentials (every override must be
         # present; no "*" special-case) — Go errors otherwise rather than silently widening/narrowing.
         if self._config.company_ids:
@@ -217,6 +222,8 @@ class Consumer:
             await self._nc.close()
             raise ConsumerAlreadyRunningError()
         sequence = ci.delivered.consumer_seq
+        # PARITY: consumer.go:893 — log the connected url last, after consumer setup succeeds.
+        self._logger.info("nats connected: %s", self._config.url)
 
         self._processor = BatchProcessor(
             driver, self._config.registry, self._config.schema_validator, self._metrics, self._logger,
@@ -328,6 +335,8 @@ class Consumer:
             msgpack.packb(hb, use_bin_type=True, datetime=True),
             headers={"Nats-Msg-Id": msg_id, "content-encoding": "msgpack"},
         )
+        # PARITY: consumer.go:538 — trace the sent heartbeat.
+        self._logger.trace("heartbeat sent %s with: %s", msg_id, json.dumps(hb, default=str))
 
     # ---- shutdown ----
     async def stop(self, graceful: bool = True) -> None:

@@ -116,7 +116,7 @@ class BatchProcessor:
             evt = DBChangeEvent.from_message(msg.data, m.consumer_seq)
         except Exception as e:  # noqa: BLE001
             self._metrics.pending_events_dec()
-            log.error("error creating event: %s", e)
+            log.error("error getting event from message: %s", e)
             await self._handle_error(e)
 
         if self.should_skip(evt):
@@ -150,7 +150,13 @@ class BatchProcessor:
             self._metrics.pending_events_dec()
             await self._handle_error(e)
 
+        log.trace(
+            "process returned. flush=%s,pending=%d,max=%d", flush, len(self._pending), self._max
+        )  # PARITY: consumer.go:436
         if flush or len(self._pending) >= self._max or force_flush:  # flush trigger #1
+            log.trace(
+                "flush 1 called. flush=%s,pending=%d,max=%d", flush, len(self._pending), self._max
+            )  # PARITY: consumer.go:440
             await self.flush(log)
             return
         if self._pending_started is None:
@@ -165,6 +171,10 @@ class BatchProcessor:
             len(self._pending) >= self._max
             or (self._now() - self._pending_started) >= self._max_pending_latency
         ):
+            log.trace(
+                "flush 2 called. flush=%s,pending=%d,max=%d,started=%s",
+                flush, len(self._pending), self._max, self._now() - self._pending_started,
+            )  # PARITY: consumer.go:457
             await self.flush(log)
 
     async def on_idle(self) -> None:
@@ -220,17 +230,20 @@ class BatchProcessor:
                 found, valid, path = self._validator.validate(evt)
             except SchemaValidationError as e:
                 self._logger.debug(
-                    "skipping %s, schema did not validate (%s)", evt.table, str(e).replace("\n", " ").strip()
+                    "skipping %s, schema did not validate (%s) for event: %s",
+                    evt.table, str(e).replace("\n", " ").strip(), evt.to_json(),
                 )
                 return True
             except Exception as e:  # noqa: BLE001
-                self._logger.error("error validating schema: %s", e)
+                self._logger.error("error validating schema: %s for event: %s", e, evt.to_json())
                 return True
             if not found:
-                self._logger.trace("skipping %s, no schema found", evt.table)
+                self._logger.trace("skipping %s, no schema found for event: %s", evt.table, evt.to_json())
                 return True
             if not valid:
-                self._logger.trace("skipping %s, schema did not validate", evt.table)
+                self._logger.trace(
+                    "skipping %s, schema did not validate for event: %s", evt.table, evt.to_json()
+                )
                 return True
             if path != "":
                 evt.schema_validated_path = path
@@ -242,16 +255,27 @@ class BatchProcessor:
         found, version = self._registry.get_table_version(evt.table)
         if found and version == evt.model_version:
             return False
+        # PARITY: consumer.go:282 — migration-needed pre-log.
+        self._logger.trace(
+            "%s found: %s, version: %s, model version: %s", evt.table, found, version, evt.model_version
+        )
         newschema = self._registry.get_schema(evt.table, evt.model_version)
         if not found:
+            self._logger.debug(
+                "need to migrate new table: %s, model version: %s", evt.table, evt.model_version
+            )  # PARITY: consumer.go:289
             self._driver.migrate_new_table(self._ctx, self._logger, newschema)
             self._registry.set_table_version(evt.table, evt.model_version)
-            self._logger.info("migrated new table %s", evt.table)
+            self._logger.info("migrated new table: %s, model version: %s", evt.table, evt.model_version)
             return True
         oldschema = self._registry.get_schema(evt.table, version)
         old_cols = oldschema.columns()
         columns = [c for c in newschema.columns() if c not in old_cols]
         if columns:
+            self._logger.debug(
+                "need to migrate table: %s, columns: %s, model version: %s",
+                evt.table, ",".join(columns), evt.model_version,
+            )  # PARITY: consumer.go:312
             self._driver.migrate_new_columns(self._ctx, self._logger, newschema, columns)
             if evt.diff is None:
                 evt.diff = []
@@ -259,10 +283,16 @@ class BatchProcessor:
                 if col not in evt.diff:
                     evt.diff.append(col)
             self._registry.set_table_version(evt.table, evt.model_version)
-            self._logger.info("migrated table %s", evt.table)
+            self._logger.info(
+                "migrated table: %s, columns: %s, model version: %s",
+                evt.table, ",".join(columns), evt.model_version,
+            )
             return True
         # QUIRK: version differs but no new columns → do NOT set_table_version (re-diffed every event).
-        self._logger.info("new table %s but no new columns added", evt.table)
+        self._logger.info(
+            "new table: %s with different model version: %s but no new columns added",
+            evt.table, evt.model_version,
+        )
         return False
 
     async def nack_everything(self) -> None:
@@ -271,7 +301,7 @@ class BatchProcessor:
             try:
                 await m.nak()
             except Exception as e:  # noqa: BLE001
-                self._logger.error("error naking message: %s", e)
+                self._logger.error("error nacking msg: %s", e)
         self._pending = []
         self._pending_started = None
 
@@ -283,8 +313,8 @@ class BatchProcessor:
     async def _ack(self, msg: Msg) -> None:
         try:
             await msg.ack()
-        except Exception as e:  # noqa: BLE001
-            self._logger.error("error acking message: %s", e)
+        except Exception as e:  # noqa: BLE001 — PARITY: consumer.go:382 skip-path ack failure.
+            self._logger.error("error acking skipped msg: %s", e)
 
     def _remove_from_pending(self, msg: Msg) -> None:
         for i, m in enumerate(self._pending):

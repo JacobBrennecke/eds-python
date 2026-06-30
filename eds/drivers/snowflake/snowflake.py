@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -29,6 +30,7 @@ from eds.driver import (
 from eds.drivers.snowflake import sql
 from eds.schema import DatabaseSchema, Schema, SchemaMap, SchemaRegistry
 from eds.util.batcher import Batcher, Record
+from eds.util.duration import format_duration
 from eds.util.logger import Logger
 from eds.util.optimize import combine_records_with_same_primary_key, sort_records_by_mvcc_timestamp
 
@@ -132,7 +134,9 @@ class SnowflakeDriver:
         self._sequence = 0
         self._stopped = False
         self._lock = threading.Lock()
+        # PARITY: snowflake.go DriverProfilingInfo — last/average batch exec duration (seconds) + record count.
         self._prof_last = 0.0
+        self._prof_average = 0.0
         self._prof_records = 0
         self._mode: IngestMode = IngestMode.UPSERT  # FEATURE(audit-mode): captured in start(); append branch below
 
@@ -203,6 +207,13 @@ class SnowflakeDriver:
             if self._stopped:
                 return
             self._stopped = True
+        # PARITY: snowflake.go:155 — flush on stop, swallowing the error SILENTLY (matches Go; also closes a real
+        # data-loss-on-shutdown gap). flush() acquires self._lock internally, so it must run OUTSIDE the lock above.
+        try:
+            self.flush(self._logger)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001 — Go ignores the returned flush-on-stop error
+            pass
+        with self._lock:
             if self._db is not None:
                 self._db.close()
                 self._db = None
@@ -219,6 +230,23 @@ class SnowflakeDriver:
             self._batcher.add(event)
         return False
 
+    def _add_profiling_record(self, duration: float, records_processed: int) -> None:
+        """PARITY: snowflake.go addProfilingRecord (:115) — running last/average exec duration (seconds)."""
+        self._prof_last = duration
+        old_count = self._prof_records
+        new_count = old_count + records_processed
+        if new_count > 0:
+            self._prof_average = (self._prof_average * old_count + duration) / new_count
+        self._prof_records = new_count
+
+    def _profiling_info(self) -> str:
+        """PARITY: snowflake.go DriverProfilingInfo.String (:111)."""
+        return (
+            f"records processed: {self._prof_records}, "
+            f"last batch duration: {format_duration(self._prof_last)}, "
+            f"average row execution duration: {format_duration(self._prof_average)}"
+        )
+
     def flush(self, logger: Logger) -> None:
         """PARITY: Flush — RecordOptimize, plan, single multi-statement exec, then tracker bookkeeping."""
         assert self._registry is not None
@@ -229,6 +257,8 @@ class SnowflakeDriver:
             count = len(records)
             self._batcher.clear()  # PARITY: cleared BEFORE exec — no re-add on error
             if count == 0:
+                # PARITY: snowflake.go:302 — profiling info logged on every flush.
+                logger.debug("profiling info for session %s: %s", self._session_id, self._profiling_info())
                 return
             self._sequence += 1
             records = sort_records_by_mvcc_timestamp(records)
@@ -239,13 +269,23 @@ class SnowflakeDriver:
                 records = combine_records_with_same_primary_key(records)
                 plan = plan_flush(records, self._registry, lambda k: self._tracker.get_key(k)[0], logger)
             if plan.statement_count > 0:
+                started = time.monotonic()
                 rows = self._db.exec_multi_statement(plan.query, plan.statement_count)
+                duration = time.monotonic() - started
+                self._add_profiling_record(duration, count)  # PARITY: snowflake.go:280
                 if rows != plan.statement_count:
-                    logger.warn("expected %d rows affected but got %d", plan.statement_count, rows)
+                    # PARITY: snowflake.go:285
+                    logger.warn(
+                        "executed query (%s/%d/%d) in %s (expected %d rows, was %d)",
+                        tag, plan.statement_count, rows, format_duration(duration),
+                        plan.statement_count, rows,
+                    )
             if plan.cache_keys:
                 self._tracker.set_keys(plan.cache_keys, tag, _CACHE_TTL_SECONDS)
             if plan.delete_keys:
                 self._tracker.delete_key(*plan.delete_keys)
+            # PARITY: snowflake.go:302 — profiling info logged on every flush.
+            logger.debug("profiling info for session %s: %s", self._session_id, self._profiling_info())
 
     # ---- migration ----
     def migrate_new_table(self, ctx: Any, logger: Logger, schema: Schema) -> None:

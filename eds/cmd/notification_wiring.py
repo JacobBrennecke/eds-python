@@ -164,6 +164,7 @@ def build_notification_handler(ctx: ControlPlaneContext) -> NotificationHandler:
         # PARITY: restart swallows a loopback error (logs + returns void → respond_generically(None) Success=true).
         try:
             if ctx.fork_running:
+                ctx.logger.info("need to restart")  # PARITY: server.go:554
                 _control_get(ctx, "restart")
         except Exception as e:  # noqa: BLE001
             ctx.logger.error("failed to restart: %s", e)
@@ -174,12 +175,14 @@ def build_notification_handler(ctx: ControlPlaneContext) -> NotificationHandler:
         # DEVIATION: Go logger.Fatal on a loopback error; here we log and return (no Fatal from a worker thread).
         if not ctx.fork_running:
             return
+        ctx.logger.info("shutdown requested: %s", message)  # PARITY: server.go:566
         try:
             _control_get(ctx, "shutdown")
         except Exception as e:  # noqa: BLE001
             ctx.logger.error("failed to shutdown: %s", e)
             return  # PARITY: a loopback failure → Fatal+return; the de-enroll write does NOT run
         if deleted:  # PARITY: de-enroll — clear server_id in config.toml (server.go:575-576)
+            ctx.logger.info("shutdown successful")  # PARITY: server.go:574
             try:
                 set_config_value(ctx.data_dir, "server_id", "")
             except Exception as e:  # noqa: BLE001 — Go logs the WriteConfig error (non-fatal)
@@ -188,7 +191,9 @@ def build_notification_handler(ctx: ControlPlaneContext) -> NotificationHandler:
     def pause():  # PARITY: returns None on success or the error (→ respond_generically publishes Success=false)
         try:
             if ctx.fork_running:
+                ctx.logger.info("server pause requested")  # PARITY: server.go:586
                 _control_get(ctx, "pause")
+                ctx.logger.info("server paused")  # PARITY: server.go:594
             return None
         except Exception as e:  # noqa: BLE001
             ctx.logger.error("failed to pause: %s", e)
@@ -197,7 +202,9 @@ def build_notification_handler(ctx: ControlPlaneContext) -> NotificationHandler:
     def unpause():
         try:
             if ctx.fork_running:
+                ctx.logger.info("server unpause requested")  # PARITY: server.go:604
                 _control_get(ctx, "unpause")
+                ctx.logger.info("server unpaused")  # PARITY: server.go:612
             return None
         except Exception as e:  # noqa: BLE001
             ctx.logger.error("failed to unpause: %s", e)

@@ -201,7 +201,12 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
     keep_logs = args.keep_logs or config.get_bool("keep_logs")
     nats_url = args.nats_url
     if not api_key:
-        logger.fatal("an API key is required (--api-key or $SM_APIKEY)")
+        from eds.cmd.root import get_command_example
+
+        # PARITY: server.go:485 — API-key-missing fatal.
+        logger.fatal("API key not found. Make sure you run %s before continuing.",
+                     get_command_example("enroll", "[CODE]"))
+    logger.info("server id: %s", server_id)  # PARITY: server.go:500
     # No --url is allowed: the server starts UNCONFIGURED and waits for a `configure` + `import` notification from
     # HQ before forking the first consumer (PARITY: server.go configureChannel flow, :1003-1014).
 
@@ -213,7 +218,7 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
             return EXIT_INCORRECT_USAGE  # unreachable (fatal exits)
     else:
         api_url = args.api_url
-        logger.info("using alternate api url: %s", api_url)
+        logger.info("using alternative API url: %s", api_url)
     api_url = api_url.rstrip("/")
 
     if "localhost" in api_url:  # PARITY: server.go:924-926 — a localhost api url forces localhost NATS
@@ -250,11 +255,15 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
                 # ctx.driver_url, not the captured driver_url: configure may have set it since the last iteration.
                 session = send_start(logger, api_url, api_key, ctx.driver_url, server_id, company_ids, version=version)
             except AlreadyRunningError:
-                logger.info("another server is already running for this id; retrying in 5s")
+                # PARITY: server.go:974
+                logger.info(
+                    "another eds server is already running for this server (id: %s). "
+                    "Retrying in 5 seconds", server_id,
+                )
                 time.sleep(5)
                 continue
             except Exception as e:  # noqa: BLE001
-                logger.fatal("failed to start session: %s", e)
+                logger.fatal("failed to send session start: %s", e)
                 return EXIT_INCORRECT_USAGE  # unreachable (fatal exits) — for the type checker
 
             session_id = session.session_id
@@ -276,7 +285,8 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
             except Exception as e:  # noqa: BLE001
                 runner.stop()
                 if is_nats_connection_error(e):  # PARITY: NATS-connect failure → retry in 5s (server.go:996)
-                    logger.warn("failed to connect to nats: %s; retrying in 5s", e)
+                    logger.trace("error from nats: %s", e)  # PARITY: server.go:997 (hidden by default)
+                    logger.trace("nats not available, retrying in 5 seconds")  # PARITY: server.go:998
                     time.sleep(5)
                     continue
                 # other Start errors: the control plane is auxiliary — log and fork anyway so data keeps streaming
@@ -343,6 +353,7 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
                         logger.error("failed to upload logs: %s", e)
 
                 if ec == EXIT_NATS_DISCONNECTED:
+                    logger.info("nats disconnected, retrying in 5 seconds")  # PARITY: server.go:1061
                     time.sleep(5)
                     continue
                 if ec == EXIT_SUCCESS:
@@ -358,15 +369,16 @@ def _run_control_plane(logger: Logger, args: argparse.Namespace, argv: list[str]
                 ):
                     return ec
                 if ec == EXIT_RESTART:
-                    logger.info("shut down as part of restart")
+                    # PARITY: server.go:1078
+                    logger.info("server shut down as part of restart (code = %d)", ec)
                     continue
                 failures += 1
-                logger.error("consumer exited with code %d (failure %d/%d)", ec, failures, MAX_FAILURES)
+                logger.error("server exited with code %d", ec)  # PARITY: server.go:1081
             finally:
                 ctx.fork_running = False
                 runner.stop()  # PARITY: notificationConsumer.Stop() each iteration (server.go:1084)
 
-        logger.fatal("too many failures, giving up")
+        logger.fatal("too many failures after %d attempts, exiting", failures)  # PARITY: server.go:969
         return 1
     finally:
         # PARITY: server.go:522-529 defer — scrub the (last) creds file, then remove the session dir if it is now
